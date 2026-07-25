@@ -25,10 +25,13 @@
     margin:0 0 16px; background:var(--panel); }
   legend { padding:0 6px; font-weight:600; font-size:13px; }
   label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  label.inline { display:inline-flex; align-items:center; gap:6px; margin:0; }
   input, textarea, select, button { font:inherit; color:var(--fg); background:var(--bg);
     border:1px solid var(--line); border-radius:6px; padding:6px 9px; }
   input[type=text], textarea { width:100%; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  input[type=checkbox] { width:auto; }
   textarea { min-height:108px; resize:vertical; }
+  select#park { width:100%; max-width:440px; }
   button { cursor:pointer; background:var(--accent); color:#fff; border-color:transparent;
     font-weight:600; padding:7px 16px; }
   button:disabled { opacity:.45; cursor:default; }
@@ -65,13 +68,16 @@
 
 <fieldset>
   <legend>Source</legend>
+  <label for="park">Map</label>
+  <select id="park"></select>
+  <p class="note" id="parknote"></p>
+
   <label for="tpl">Tile URL template</label>
-  <input type="text" id="tpl"
-    value="https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg">
+  <input type="text" id="tpl">
   <div class="row">
     <div style="flex:1 1 220px">
       <label for="code">Version code</label>
-      <input type="text" id="code" value="900014458">
+      <input type="text" id="code">
     </div>
     <div>
       <label for="rps">Requests/sec</label>
@@ -91,27 +97,25 @@
 <fieldset>
   <legend>Declared bounds</legend>
   <label for="bounds">boundsByZoom JSON</label>
-  <textarea id="bounds" spellcheck="false">{
-  "11": { "minX": 555, "maxX": 564, "minY": 851, "maxY": 859 },
-  "12": { "minX": 1114, "maxX": 1125, "minY": 1706, "maxY": 1715 },
-  "13": { "minX": 2228, "maxX": 2251, "minY": 3412, "maxY": 3431 },
-  "14": { "minX": 4456, "maxX": 4503, "minY": 6824, "maxY": 6863 },
-  "15": { "minX": 8928, "maxX": 8987, "minY": 13672, "maxY": 13699 },
-  "16": { "minX": 17856, "maxX": 17975, "minY": 27344, "maxY": 27399 },
-  "17": { "minX": 35712, "maxX": 35951, "minY": 54688, "maxY": 54799 },
-  "18": { "minX": 71424, "maxX": 71903, "minY": 109376, "maxY": 109599 },
-  "19": { "minX": 143264, "maxX": 143455, "minY": 218752, "maxY": 219199 },
-  "20": { "minX": 286528, "maxX": 286911, "minY": 437504, "maxY": 438399 }
-}</textarea>
+  <textarea id="bounds" spellcheck="false"></textarea>
   <div class="row" style="margin-top:12px">
     <div><label for="zoom">Zoom</label><select id="zoom"></select></div>
   </div>
   <div class="actions">
     <button id="run">Trace this zoom</button>
     <button id="runAll" class="secondary">Trace every zoom</button>
+    <button id="runEverything" class="secondary">Check every map and zoom</button>
     <button id="stop" class="secondary" disabled>Stop</button>
-    <span id="status" class="muted"></span>
+    <label class="inline"><input type="checkbox" id="wake" checked> keep the screen awake</label>
   </div>
+  <p class="note" id="status"></p>
+  <p class="note" id="estimate"></p>
+  <p class="note">
+    Built for long runs: results are written to the table as each zoom finishes and
+    kept in this browser, so a refresh or a crash does not lose the night's work.
+    If the network drops the run pauses rather than recording the whole map as
+    missing.
+  </p>
 </fieldset>
 
 <h2>What it walked</h2>
@@ -127,14 +131,18 @@
 <div class="scroll">
   <table id="results">
     <thead><tr>
-      <th>zoom</th><th>requests</th><th>regions</th><th>border</th>
+      <th>map</th><th>zoom</th><th>requests</th><th>regions</th><th>border</th>
       <th>declared box</th><th>traced box</th><th>shape</th>
     </tr></thead>
     <tbody></tbody>
   </table>
 </div>
 <pre id="summary" hidden></pre>
-<div class="actions"><button id="copy" class="secondary" disabled>Copy results</button></div>
+<div class="actions">
+  <button id="copy" class="secondary" disabled>Copy results</button>
+  <button id="download" class="secondary" disabled>Download .tsv</button>
+  <button id="clear" class="secondary" disabled>Clear results</button>
+</div>
 
 </div>
 
@@ -142,15 +150,145 @@
 (function () {
   "use strict";
 
+  // Every public Disney map, as declared in the viewer's parks/{id}/ configs.
+  // TDR is deliberately absent: its tiles are only reachable through a
+  // credentialled proxy, and an <img> probe cannot carry the signed cookies.
+  const PARKS = [
+    {
+      id: "wdw",
+      label: "Walt Disney World",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg",
+      code: "900014458",
+      codeLabel: "Jul '26 (Late)",
+      scheme: "xyz",
+      note: "Bounds shrink as zoom rises: deep detail is only drawn near the resort, so a smaller box at z19 than at z18 is data, not a bug.",
+      bounds: {
+        "11": { minX: 555, maxX: 564, minY: 851, maxY: 859 },
+        "12": { minX: 1118, maxX: 1125, minY: 1706, maxY: 1715 },
+        "13": { minX: 2228, maxX: 2251, minY: 3412, maxY: 3431 },
+        "14": { minX: 4456, maxX: 4503, minY: 6824, maxY: 6863 },
+        "15": { minX: 8928, maxX: 8987, minY: 13672, maxY: 13699 },
+        "16": { minX: 17856, maxX: 17975, minY: 27344, maxY: 27399 },
+        "17": { minX: 35712, maxX: 35951, minY: 54688, maxY: 54799 },
+        "18": { minX: 71424, maxX: 71903, minY: 109376, maxY: 109599 },
+        "19": { minX: 143264, maxX: 143455, minY: 218752, maxY: 219199 },
+        "20": { minX: 286528, maxX: 286911, minY: 437504, maxY: 438399 },
+      },
+    },
+    {
+      id: "dlr",
+      label: "Disneyland Resort (California)",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/disneyland/{code}/{z}/{x}/{y}.jpg",
+      code: "840388841",
+      codeLabel: "Jul '26 (Late)",
+      scheme: "xyz",
+      note: "",
+      bounds: {
+        "14": { minX: 2818, maxX: 2831, minY: 6549, maxY: 6560 },
+        "15": { minX: 5636, maxX: 5663, minY: 13102, maxY: 13117 },
+        "16": { minX: 11272, maxX: 11327, minY: 26208, maxY: 26231 },
+        "17": { minX: 22544, maxX: 22655, minY: 52416, maxY: 52463 },
+        "18": { minX: 45088, maxX: 45311, minY: 104832, maxY: 104927 },
+        "19": { minX: 90176, maxX: 90623, minY: 209664, maxY: 209855 },
+        "20": { minX: 180352, maxX: 181247, minY: 419328, maxY: 419739 },
+      },
+    },
+    {
+      id: "dlp",
+      label: "Disneyland Paris",
+      template: "https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg",
+      code: "current",
+      codeLabel: "Current",
+      scheme: "xyz",
+      note: "Its own host, and one live map only — the template carries no {code}, so the version box is ignored here.",
+      bounds: {
+        "13": { minX: 4156, maxX: 4161, minY: 2816, maxY: 2819 },
+        "14": { minX: 8312, maxX: 8323, minY: 5632, maxY: 5639 },
+        "15": { minX: 16624, maxX: 16647, minY: 11264, maxY: 11279 },
+        "16": { minX: 33248, maxX: 33295, minY: 22528, maxY: 22559 },
+        "17": { minX: 66496, maxX: 66591, minY: 45056, maxY: 45119 },
+        "18": { minX: 132992, maxX: 133183, minY: 90112, maxY: 90239 },
+        "19": { minX: 265984, maxX: 266367, minY: 180224, maxY: 180479 },
+        "20": { minX: 531968, maxX: 532735, minY: 360448, maxY: 360959 },
+      },
+    },
+    {
+      id: "hkdl",
+      label: "Hong Kong Disneyland",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/hkdl/{code}/{z}/{x}/{y}.jpg",
+      code: "51",
+      codeLabel: "Jun 2026",
+      scheme: "xyz",
+      note: "",
+      bounds: {
+        "14": { minX: 13380, maxX: 13383, minY: 7148, maxY: 7150 },
+        "15": { minX: 26762, maxX: 26765, minY: 14297, maxY: 14300 },
+        "16": { minX: 53524, maxX: 53531, minY: 28594, maxY: 28601 },
+        "17": { minX: 107048, maxX: 107063, minY: 57188, maxY: 57203 },
+        "18": { minX: 214096, maxX: 214127, minY: 114376, maxY: 114407 },
+        "19": { minX: 428192, maxX: 428255, minY: 228752, maxY: 228815 },
+        "20": { minX: 856384, maxX: 856511, minY: 457504, maxY: 457631 },
+      },
+    },
+    {
+      id: "shdr",
+      label: "Shanghai Disney Resort",
+      template: "https://secure.cdn1.wdpromedia.com/media/maps/prod/shdr-baidu-mob-en/{code}/{z}/{x}/{y}.jpg",
+      code: "981376074",
+      codeLabel: "Mar '26",
+      scheme: "tms",
+      note: "yScheme is tms: Y counts up from the south. These bounds are already in server space, so they go into the URL unflipped.",
+      bounds: {
+        "9": { minX: 103, maxX: 103, minY: 27, maxY: 27 },
+        "10": { minX: 206, maxX: 206, minY: 55, maxY: 55 },
+        "11": { minX: 412, maxX: 413, minY: 110, maxY: 111 },
+        "12": { minX: 825, maxX: 827, minY: 220, maxY: 222 },
+        "13": { minX: 1651, maxX: 1655, minY: 441, maxY: 444 },
+        "14": { minX: 3302, maxX: 3310, minY: 882, maxY: 889 },
+        "15": { minX: 6609, maxX: 6617, minY: 1768, maxY: 1776 },
+        "16": { minX: 13218, maxX: 13235, minY: 3536, maxY: 3553 },
+        "17": { minX: 26447, maxX: 26459, minY: 7084, maxY: 7095 },
+        "18": { minX: 52895, maxX: 52919, minY: 14168, maxY: 14191 },
+        "19": { minX: 105791, maxX: 105839, minY: 28336, maxY: 28383 },
+        "20": { minX: 211583, maxX: 211679, minY: 56672, maxY: 56767 },
+      },
+    },
+  ];
+
+  const CUSTOM = { id: "custom", label: "Custom", scheme: "xyz", note: "" };
+
   const $ = (id) => document.getElementById(id);
   const canvas = $("map"), ctx = canvas.getContext("2d");
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  let stopped = false, requests = 0, capped = false;
-  const rows = [];
+  let stopped = false, requests = 0, capped = false, running = false;
+  let park = PARKS[0];
 
   // Clockwise from north-west. Order matters: the tracer rotates through this
   // ring, so a different order walks the border the other way round.
   const RING = [[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0]];
+
+  // -- progress -----------------------------------------------------------
+
+  const state = { park: "", z: 0, zoomIndex: 0, zoomCount: 0, mapIndex: 0, mapCount: 0, started: 0 };
+
+  function duration(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), h = Math.floor(m / 60);
+    return h ? `${h}h ${String(m % 60).padStart(2, "0")}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  }
+
+  function tick(suffix) {
+    if (!running && !suffix) return;
+    const parts = [];
+    if (state.mapCount > 1) parts.push(`map ${state.mapIndex}/${state.mapCount}`);
+    if (state.park) parts.push(state.park);
+    if (state.zoomCount) parts.push(`z${state.z} (${state.zoomIndex}/${state.zoomCount})`);
+    parts.push(`${requests.toLocaleString()} requests`);
+    if (state.started) parts.push(`${duration(Date.now() - state.started)} elapsed`);
+    if (suffix) parts.push(suffix);
+    $("status").textContent = parts.join(" · ");
+  }
 
   // -- probing ------------------------------------------------------------
 
@@ -160,6 +298,18 @@
     const wait = Math.max(0, nextSlot - performance.now());
     nextSlot = performance.now() + wait + gap;
     if (wait > 0) await sleep(wait);
+  }
+
+  // An <img> that fails to load looks exactly like a tile that is not there,
+  // so a dropped connection would otherwise be recorded as "no imagery" for
+  // every remaining tile. Waiting is the only honest response.
+  async function waitForNetwork() {
+    if (navigator.onLine !== false) return;
+    while (navigator.onLine === false && !stopped) {
+      tick("offline — waiting for the network");
+      await sleep(5000);
+    }
+    nextSlot = performance.now();
   }
 
   function url(z, x, y) {
@@ -199,14 +349,14 @@
     if (cache.has(key)) return cache.get(key);
     if (capped || stopped) return false;
     if (requests >= Math.max(200, +$("maxreq").value || 6000)) { capped = true; return false; }
+    await waitForNetwork();
+    if (stopped) return false;
     await gate();
     requests++;
     const got = await probeRaw(url(zoom, x, y));
     cache.set(key, got);
     paint(x, y, got ? "#22c55e" : "#dc2626");
-    if (requests % 15 === 0) {
-      $("status").textContent = `z${zoom}: ${requests.toLocaleString()} requests`;
-    }
+    if (requests % 15 === 0) tick();
     return got;
   }
 
@@ -219,7 +369,11 @@
     canvas.width = w * cell; canvas.height = h * cell;
     ctx.fillStyle = "#6b7280"; ctx.fillRect(0, 0, canvas.width, canvas.height);
     view = { cell, b };
-    $("orient").textContent = `${w} × ${h} tiles · north at top, west at left`;
+    // TMS rows count up from the south, so the low-Y edge is the bottom of the
+    // map rather than the top. The canvas is drawn in raw tile order either
+    // way; only the caption changes.
+    const north = park.scheme === "tms" ? "bottom" : "top";
+    $("orient").textContent = `${w} × ${h} tiles · north at ${north}, west at left`;
   }
   function paint(x, y, colour) {
     if (!view) return;
@@ -390,9 +544,7 @@
   }
 
   function describe(r) {
-    if (!r.regions.length) {
-      return ['<span class="bad">no imagery found</span>', "no imagery found"];
-    }
+    if (!r.regions.length) return { text: "no imagery found", cls: "bad" };
     const parts = [];
     if (r.regions.length > 1) parts.push(`${r.regions.length} separate regions`);
     const bad = r.regions.filter((g) => !g.rectangle);
@@ -407,35 +559,134 @@
       );
     }
     if (r.capped) parts.push("hit the request cap");
-    const text = parts.join(", ");
-    const cls = bad.length || r.capped ? "bad" : (r.regions.length > 1 ? "warn" : "ok");
-    return [`<span class="${cls}">${text}</span>`, text];
+    return {
+      text: parts.join(", "),
+      cls: bad.length || r.capped ? "bad" : (r.regions.length > 1 ? "warn" : "ok"),
+    };
   }
 
-  function addRow(r) {
-    const [html, text] = describe(r);
-    const d = r.declared;
-    const all = r.regions.flatMap((g) => g.contour);
-    const box = all.length ? boxOf(all) : null;
-    const border = r.regions.reduce((n, g) => n + g.filled.size, 0);
+  // -- results ------------------------------------------------------------
+
+  // Kept in the browser so an overnight run survives a refresh, a crash, or a
+  // laptop lid. Rows are plain data; the table is rebuilt from them on load.
+  const STORE = "tilearc.border-trace.rows.v1";
+  let rows = [];
+
+  function loadRows() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORE));
+      return Array.isArray(raw) ? raw : [];
+    } catch (e) { return []; }
+  }
+  function saveRows() {
+    try { localStorage.setItem(STORE, JSON.stringify(rows)); } catch (e) { /* quota, private mode */ }
+  }
+
+  const boxText = (b) => b ? `${b.minX}-${b.maxX}, ${b.minY}-${b.maxY}` : "—";
+
+  function renderRow(row) {
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td>${r.z}</td><td>${r.requests.toLocaleString()}</td>` +
-      `<td>${r.regions.length}</td><td>${border.toLocaleString()}</td>` +
-      `<td class="mono">${d.minX}-${d.maxX}, ${d.minY}-${d.maxY}</td>` +
-      `<td class="mono">${box ? `${box.minX}-${box.maxX}, ${box.minY}-${box.maxY}` : "—"}</td>` +
-      `<td>${html}</td>`;
+      `<td>${row.map}</td><td>${row.z}</td><td>${row.requests.toLocaleString()}</td>` +
+      `<td>${row.regions}</td><td>${row.border.toLocaleString()}</td>` +
+      `<td class="mono">${row.declared}</td><td class="mono">${row.traced}</td>` +
+      `<td class="${row.cls}">${row.text}</td>`;
     $("results").tBodies[0].appendChild(tr);
-    rows.push(
-      `z${r.z}\t${r.requests} requests\t${r.regions.length} region(s)\tborder ${border}` +
-      `\tdeclared ${d.minX}-${d.maxX},${d.minY}-${d.maxY}` +
-      `\ttraced ${box ? `${box.minX}-${box.maxX},${box.minY}-${box.maxY}` : "none"}\t${text}`
-    );
-    $("copy").disabled = false;
   }
 
+  function addRow(mapLabel, r) {
+    const { text, cls } = describe(r);
+    const all = r.regions.flatMap((g) => g.contour);
+    const row = {
+      map: mapLabel,
+      z: r.z,
+      requests: r.requests,
+      regions: r.regions.length,
+      border: r.regions.reduce((n, g) => n + g.filled.size, 0),
+      declared: boxText(r.declared),
+      traced: boxText(all.length ? boxOf(all) : null),
+      text, cls,
+      at: new Date().toISOString(),
+    };
+    rows.push(row);
+    renderRow(row);
+    saveRows();
+    refreshResultButtons();
+  }
+
+  function tsv() {
+    const head = ["map", "zoom", "requests", "regions", "border tiles",
+                  "declared box", "traced box", "shape", "checked at"];
+    const body = rows.map((r) => [
+      r.map, "z" + r.z, r.requests, r.regions, r.border,
+      r.declared, r.traced, r.text, r.at,
+    ].join("\t"));
+    return [head.join("\t")].concat(body).join("\n");
+  }
+
+  function refreshResultButtons() {
+    const empty = rows.length === 0;
+    $("copy").disabled = empty;
+    $("download").disabled = empty;
+    $("clear").disabled = empty;
+  }
+
+  // -- cost estimate ------------------------------------------------------
+
+  // Rough, and meant to be: the walk costs about a couple of probes per border
+  // tile once the neighbour cache is warm, plus the seed search. Good enough to
+  // answer "will this finish by morning?".
+  function estimate(bounds) {
+    const cap = Math.max(200, +$("maxreq").value || 6000);
+    let total = 0;
+    for (const z of Object.keys(bounds)) {
+      const b = bounds[z];
+      const perimeter = 2 * (b.maxX - b.minX + 1) + 2 * (b.maxY - b.minY + 1);
+      total += Math.min(cap, Math.round(perimeter * 2.2) + 80);
+    }
+    return total;
+  }
+
+  function updateEstimate() {
+    const rps = Math.max(1, +$("rps").value || 12);
+    const here = parseBounds();
+    const all = PARKS.reduce((n, p) => n + estimate(p.bounds), 0);
+    const parts = [];
+    if (here) {
+      const mine = estimate(here);
+      parts.push(`This map: roughly ${mine.toLocaleString()} requests, about ${duration(mine / rps * 1000)}.`);
+    }
+    parts.push(
+      `All ${PARKS.length} maps: roughly ${all.toLocaleString()} requests, ` +
+      `about ${duration(all / rps * 1000)} at ${rps}/s.`
+    );
+    $("estimate").textContent = parts.join(" ");
+  }
+
+  // -- keeping the machine awake ------------------------------------------
+
+  let wakeLock = null;
+  async function acquireWake() {
+    if (!$("wake").checked || !navigator.wakeLock) return;
+    try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { wakeLock = null; }
+  }
+  function releaseWake() {
+    if (!wakeLock) return;
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+  // The lock is dropped whenever the tab is hidden, and is not handed back
+  // automatically -- so ask again each time the tab comes forward.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && running && !wakeLock) acquireWake();
+  });
+
+  // -- driving ------------------------------------------------------------
+
   function busy(on) {
-    $("run").disabled = on; $("runAll").disabled = on; $("stop").disabled = !on;
+    running = on;
+    $("run").disabled = on; $("runAll").disabled = on; $("runEverything").disabled = on;
+    $("stop").disabled = !on;
   }
 
   function parseBounds() {
@@ -451,17 +702,67 @@
     } catch (e) { return null; }
   }
 
+  function formatBounds(bounds) {
+    const lines = Object.keys(bounds).map(Number).sort((a, b) => a - b).map((z) => {
+      const b = bounds[z];
+      return `  "${z}": { "minX": ${b.minX}, "maxX": ${b.maxX}, "minY": ${b.minY}, "maxY": ${b.maxY} }`;
+    });
+    return "{\n" + lines.join(",\n") + "\n}";
+  }
+
+  function applyPark(p) {
+    park = p;
+    $("park").value = p.id;
+    $("tpl").value = p.template;
+    $("code").value = p.code;
+    $("bounds").value = formatBounds(p.bounds);
+    $("parknote").textContent = p.note || `Version ${p.codeLabel} (${p.code}).`;
+    refreshZooms();
+    updateEstimate();
+  }
+
+  async function runSeries(mapLabel, zooms, bounds) {
+    state.park = mapLabel;
+    state.zoomCount = zooms.length;
+    for (let i = 0; i < zooms.length; i++) {
+      if (stopped) break;
+      const declared = bounds[zooms[i]];
+      if (!declared) continue;
+      state.z = zooms[i]; state.zoomIndex = i + 1;
+      requests = 0; tick();
+      addRow(mapLabel, await runZoom(zooms[i], declared));
+    }
+  }
+
+  // One map, from whatever is currently in the form.
   async function go(zooms) {
     const bounds = parseBounds();
     if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
-    stopped = false; busy(true);
+    stopped = false; busy(true); await acquireWake();
+    state.mapIndex = 1; state.mapCount = 1; state.started = Date.now();
     try {
-      for (const z of zooms) {
+      await runSeries(park.label, zooms, bounds);
+      tick(stopped ? "stopped" : "done");
+    } finally { busy(false); releaseWake(); }
+  }
+
+  // Every map, every zoom -- the overnight run.
+  async function goEverything() {
+    stopped = false; busy(true); await acquireWake();
+    state.mapCount = PARKS.length; state.started = Date.now();
+    try {
+      for (let i = 0; i < PARKS.length; i++) {
         if (stopped) break;
-        addRow(await runZoom(z, bounds[z]));
+        state.mapIndex = i + 1;
+        // Load it into the form as we go: the probe reads the template and the
+        // version code straight from those fields, and it doubles as a display
+        // of what is being checked right now.
+        applyPark(PARKS[i]);
+        const zooms = Object.keys(PARKS[i].bounds).map(Number).sort((a, b) => a - b);
+        await runSeries(PARKS[i].label, zooms, PARKS[i].bounds);
       }
-      $("status").textContent = stopped ? "stopped" : "done";
-    } finally { busy(false); }
+      tick(stopped ? "stopped" : `done — all ${PARKS.length} maps`);
+    } finally { busy(false); releaseWake(); state.mapCount = 0; }
   }
 
   function refreshZooms() {
@@ -476,23 +777,71 @@
       o.textContent = `z${z}  (perimeter about ${(2 * w + 2 * h).toLocaleString()} tiles)`;
       sel.appendChild(o);
     }
+    // Switching maps changes which zooms exist, so a remembered choice may no
+    // longer be on the list. Fall back to the first rather than leaving the
+    // select on nothing, which would make "Trace this zoom" a no-op.
     if (prev) sel.value = prev;
+    if (!sel.value && sel.options.length) sel.selectedIndex = 0;
   }
 
-  $("bounds").addEventListener("input", refreshZooms);
+  // -- wiring -------------------------------------------------------------
+
+  for (const p of PARKS.concat([CUSTOM])) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.id === "custom" ? "Custom (edit the fields below)" : p.label;
+    $("park").appendChild(o);
+  }
+
+  $("park").addEventListener("change", () => {
+    const chosen = PARKS.find((p) => p.id === $("park").value);
+    if (chosen) {
+      applyPark(chosen);
+    } else {
+      // Custom: leave the fields exactly as the user left them.
+      park = CUSTOM;
+      $("parknote").textContent = "Hand-entered source. Y is read as xyz for the caption on the map below.";
+    }
+  });
+
+  $("bounds").addEventListener("input", () => { refreshZooms(); updateEstimate(); });
+  $("rps").addEventListener("input", updateEstimate);
+  $("maxreq").addEventListener("input", updateEstimate);
+
   $("run").addEventListener("click", () => go([+$("zoom").value]));
   $("runAll").addEventListener("click", () => {
     const b = parseBounds();
     if (b) go(Object.keys(b).map(Number).sort((x, y) => x - y));
   });
-  $("stop").addEventListener("click", () => { stopped = true; $("status").textContent = "stopping…"; });
+  $("runEverything").addEventListener("click", goEverything);
+  $("stop").addEventListener("click", () => { stopped = true; tick("stopping…"); });
+
   $("copy").addEventListener("click", () => {
-    const text = rows.join("\n");
+    const text = tsv();
     $("summary").hidden = false; $("summary").textContent = text;
     if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   });
+  $("download").addEventListener("click", () => {
+    const url = URL.createObjectURL(new Blob([tsv()], { type: "text/tab-separated-values" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tile-border-trace-${new Date().toISOString().slice(0, 10)}.tsv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  });
+  $("clear").addEventListener("click", () => {
+    rows = [];
+    $("results").tBodies[0].innerHTML = "";
+    $("summary").hidden = true;
+    saveRows();
+    refreshResultButtons();
+  });
 
-  refreshZooms();
+  rows = loadRows();
+  for (const row of rows) renderRow(row);
+  refreshResultButtons();
+  if (rows.length) $("status").textContent = `${rows.length} result(s) restored from the last run.`;
+  applyPark(PARKS[0]);
 })();
 </script>
 </body>
