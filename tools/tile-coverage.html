@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tile coverage checker</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #d4d4d8;
+    --panel: #f6f6f7; --ok: #16a34a; --bad: #dc2626; --warn: #b45309;
+    --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --fg: #e8e8ea; --muted: #9ca3af; --line: #34353a;
+      --panel: #202126; --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b;
+      --accent: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  fieldset {
+    border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+    margin: 0 0 16px; background: var(--panel);
+  }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, textarea, select, button {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  }
+  input[type=text], textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  textarea { min-height: 108px; resize: vertical; }
+  button {
+    cursor: pointer; background: var(--accent); color: #fff; border-color: transparent;
+    font-weight: 600; padding: 7px 16px;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.secondary { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 0 0 auto; }
+  .grow { flex: 1 1 220px !important; }
+  .actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  canvas { border: 1px solid var(--line); border-radius: 6px; image-rendering: pixelated; max-width: 100%; background: var(--panel); }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin: 8px 0 0; flex-wrap: wrap; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; }
+  th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .muted { color: var(--muted); }
+  .note { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  #status { font-variant-numeric: tabular-nums; }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; overflow-x: auto; font-size: 12px; margin: 10px 0 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Tile coverage checker</h1>
+<p class="sub">
+  Loads tiles straight from the CDN in your browser and maps which ones actually
+  exist. Answers two questions: where does the imagery really stop, and how much
+  of the declared rectangle is empty.
+</p>
+
+<fieldset>
+  <legend>Source</legend>
+  <label for="tpl">Tile URL template</label>
+  <input type="text" id="tpl"
+    value="https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg">
+  <div class="row">
+    <div class="grow">
+      <label for="code">Version code (replaces <span class="mono">{code}</span>)</label>
+      <input type="text" id="code" value="900014458">
+    </div>
+    <div>
+      <label for="rps">Requests/sec</label>
+      <input type="number" id="rps" value="12" min="1" max="60" style="width:90px">
+    </div>
+    <div>
+      <label for="conc">Parallel</label>
+      <input type="number" id="conc" value="6" min="1" max="24" style="width:90px">
+    </div>
+  </div>
+  <p class="note">
+    Keep these gentle — this is someone else's production CDN, and the whole point
+    is to find out what's there without getting blocked.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Declared bounds</legend>
+  <label for="bounds">boundsByZoom JSON — paste straight from the park config</label>
+  <textarea id="bounds" spellcheck="false">{
+  "11": { "minX": 555, "maxX": 564, "minY": 851, "maxY": 859 },
+  "12": { "minX": 1114, "maxX": 1125, "minY": 1706, "maxY": 1715 },
+  "13": { "minX": 2228, "maxX": 2251, "minY": 3412, "maxY": 3431 },
+  "14": { "minX": 4456, "maxX": 4503, "minY": 6824, "maxY": 6863 },
+  "15": { "minX": 8928, "maxX": 8987, "minY": 13672, "maxY": 13699 },
+  "16": { "minX": 17856, "maxX": 17975, "minY": 27344, "maxY": 27399 },
+  "17": { "minX": 35712, "maxX": 35951, "minY": 54688, "maxY": 54799 },
+  "18": { "minX": 71424, "maxX": 71903, "minY": 109376, "maxY": 109599 },
+  "19": { "minX": 143264, "maxX": 143455, "minY": 218752, "maxY": 219199 },
+  "20": { "minX": 286528, "maxX": 286911, "minY": 437504, "maxY": 438399 }
+}</textarea>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="zoom">Zoom to scan</label>
+      <select id="zoom"></select>
+    </div>
+    <div>
+      <label for="budget">Max requests</label>
+      <input type="number" id="budget" value="2500" min="100" max="40000" style="width:110px">
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <span class="note" id="plan"></span>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="scan">Scan this zoom</button>
+    <button id="scanAll" class="secondary">Scan every zoom</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <span id="status" class="muted"></span>
+  </div>
+  <p class="note">
+    Over the budget it samples on a stride rather than scanning every tile, so the
+    edges it reports are accurate to within that stride. Low zooms are small enough
+    to scan completely — z11 is 90 tiles.
+  </p>
+</fieldset>
+
+<h2>Coverage map</h2>
+<canvas id="map" width="600" height="300"></canvas>
+<div class="legend">
+  <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
+  <span><span class="sw" style="background:#dc2626"></span>no tile (403/404)</span>
+  <span><span class="sw" style="background:#6b7280"></span>not yet checked</span>
+  <span id="orient" class="muted"></span>
+</div>
+
+<h2>Results</h2>
+<div class="scroll">
+  <table id="results">
+    <thead><tr>
+      <th>zoom</th><th>checked</th><th>exists</th><th>fill</th>
+      <th>declared box</th><th>observed box</th><th>verdict</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<pre id="summary" hidden></pre>
+<div class="actions">
+  <button id="copy" class="secondary" disabled>Copy results</button>
+</div>
+
+<h2>Spot-check specific tiles</h2>
+<p class="note" style="margin-bottom:8px">
+  Paste tiles the downloader called <span class="mono">missing</span> (one
+  <span class="mono">z/x/y</span> or <span class="mono">z x y</span> per line). If
+  they load here, they were never really absent — which would mean the downloader
+  is recording live tiles as permanent holes.
+</p>
+<textarea id="spot" spellcheck="false" placeholder="11/555/851&#10;12 1114 1706"></textarea>
+<div class="actions">
+  <button id="check">Check these</button>
+  <span id="spotStatus" class="muted"></span>
+</div>
+<div class="scroll"><table id="spotResults" hidden>
+  <thead><tr><th>tile</th><th>result</th><th>URL</th></tr></thead>
+  <tbody></tbody>
+</table></div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  let stopped = false, running = false;
+  const rows = [];
+
+  // -- helpers ------------------------------------------------------------
+
+  function parseBounds() {
+    try {
+      const raw = JSON.parse($("bounds").value);
+      const out = {};
+      for (const k of Object.keys(raw)) {
+        const b = raw[k];
+        const z = parseInt(k, 10);
+        if (!Number.isFinite(z)) continue;
+        out[z] = {
+          minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY,
+          get w() { return this.maxX - this.minX + 1; },
+          get h() { return this.maxY - this.minY + 1; },
+        };
+      }
+      return out;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function url(z, x, y) {
+    return $("tpl").value
+      .replaceAll("{code}", $("code").value.trim())
+      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  // Existence test. An <img> reports load/error without needing CORS; we cannot
+  // read the status code that way, but "did a picture arrive" is exactly the
+  // question, and it is the same question the map viewer itself asks.
+  function probe(u, timeoutMs) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        img.onload = img.onerror = null;
+        img.src = "";
+        resolve(v);
+      };
+      const timer = setTimeout(() => done("timeout"), timeoutMs);
+      img.onload = () => done(img.naturalWidth > 0 ? "ok" : "empty");
+      img.onerror = () => done("missing");
+      img.src = u;
+    });
+  }
+
+  // Dispatch respecting both a parallel cap and a requests/second ceiling.
+  async function runQueue(tasks, onEach) {
+    const conc = Math.max(1, +$("conc").value || 6);
+    const rps = Math.max(1, +$("rps").value || 12);
+    const gap = 1000 / rps;
+    let next = 0, lastStart = 0;
+
+    async function worker() {
+      while (next < tasks.length && !stopped) {
+        const i = next++;
+        const wait = Math.max(0, lastStart + gap - performance.now());
+        lastStart = performance.now() + wait;
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        if (stopped) return;
+        const t = tasks[i];
+        const res = await probe(t.url, 15000);
+        onEach(t, res);
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, worker));
+  }
+
+  // -- scanning -----------------------------------------------------------
+
+  function tilesFor(z, b, budget) {
+    const total = b.w * b.h;
+    let stride = 1;
+    while (Math.ceil(b.w / stride) * Math.ceil(b.h / stride) > budget) stride++;
+    const list = [];
+    for (let y = b.minY; y <= b.maxY; y += stride) {
+      for (let x = b.minX; x <= b.maxX; x += stride) {
+        list.push({ z, x, y, url: url(z, x, y) });
+      }
+    }
+    return { list, stride, total };
+  }
+
+  function setupCanvas(b, stride) {
+    const cols = Math.ceil(b.w / stride), rws = Math.ceil(b.h / stride);
+    const cell = Math.max(1, Math.min(14, Math.floor(900 / Math.max(cols, 1))));
+    canvas.width = cols * cell;
+    canvas.height = rws * cell;
+    ctx.fillStyle = "#6b7280";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    $("orient").textContent =
+      `${cols} × ${rws} cells` + (stride > 1 ? ` · sampled every ${stride} tiles` : "") +
+      " · north at top, west at left";
+    return { cell, stride, b };
+  }
+
+  function paint(view, t, exists) {
+    const cx = Math.floor((t.x - view.b.minX) / view.stride) * view.cell;
+    const cy = Math.floor((t.y - view.b.minY) / view.stride) * view.cell;
+    ctx.fillStyle = exists ? "#22c55e" : "#dc2626";
+    ctx.fillRect(cx, cy, view.cell, view.cell);
+  }
+
+  async function scanZoom(z, bounds) {
+    const b = bounds[z];
+    if (!b) return null;
+    const budget = Math.max(100, +$("budget").value || 2500);
+    const { list, stride, total } = tilesFor(z, b, budget);
+    const view = setupCanvas(b, stride);
+
+    let checked = 0, exists = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+    await runQueue(list, (t, res) => {
+      checked++;
+      const ok = res === "ok";
+      if (ok) {
+        exists++;
+        if (t.x < minX) minX = t.x;
+        if (t.x > maxX) maxX = t.x;
+        if (t.y < minY) minY = t.y;
+        if (t.y > maxY) maxY = t.y;
+      }
+      paint(view, t, ok);
+      if (checked % 10 === 0 || checked === list.length) {
+        $("status").textContent =
+          `z${z}: ${checked.toLocaleString()} / ${list.length.toLocaleString()} checked · ` +
+          `${exists.toLocaleString()} exist`;
+      }
+    });
+
+    if (!exists) {
+      return { z, checked, exists, stride, total, declared: b, observed: null };
+    }
+    return {
+      z, checked, exists, stride, total, declared: b,
+      observed: { minX, maxX, minY, maxY },
+    };
+  }
+
+  function verdict(r) {
+    if (!r.observed) return ['<span class="bad">nothing found at all</span>', "no tiles responded"];
+    const d = r.declared, o = r.observed, s = r.stride;
+    const notes = [];
+    // Only trust an edge difference bigger than the sampling stride.
+    if (o.minX - d.minX > s) notes.push(`west edge is ${o.minX - d.minX} tiles in`);
+    if (d.maxX - o.maxX > s) notes.push(`east edge is ${d.maxX - o.maxX} tiles in`);
+    if (o.minY - d.minY > s) notes.push(`north edge is ${o.minY - d.minY} tiles in`);
+    if (d.maxY - o.maxY > s) notes.push(`south edge is ${d.maxY - o.maxY} tiles in`);
+    const fill = r.exists / r.checked;
+    if (!notes.length) {
+      return fill > 0.9
+        ? ['<span class="ok">box is correct and full</span>', "box correct, essentially full"]
+        : [`<span class="warn">box is correct, ${Math.round((1 - fill) * 100)}% empty inside</span>`,
+           `box correct, ${Math.round((1 - fill) * 100)}% empty inside`];
+    }
+    return [`<span class="bad">box too big — ${notes.join(", ")}</span>`,
+            `box too big: ${notes.join(", ")}`];
+  }
+
+  function addRow(r) {
+    const [html, text] = verdict(r);
+    const d = r.declared, o = r.observed;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.z}</td>` +
+      `<td>${r.checked.toLocaleString()}${r.stride > 1 ? ` <span class="muted">of ${r.total.toLocaleString()}</span>` : ""}</td>` +
+      `<td>${r.exists.toLocaleString()}</td>` +
+      `<td>${(r.exists / r.checked * 100).toFixed(1)}%</td>` +
+      `<td class="mono">${d.minX}-${d.maxX}, ${d.minY}-${d.maxY}</td>` +
+      `<td class="mono">${o ? `${o.minX}-${o.maxX}, ${o.minY}-${o.maxY}` : "—"}</td>` +
+      `<td>${html}</td>`;
+    $("results").tBodies[0].appendChild(tr);
+    rows.push(
+      `z${r.z}\tchecked ${r.checked}${r.stride > 1 ? `/${r.total} (stride ${r.stride})` : ""}` +
+      `\texists ${r.exists} (${(r.exists / r.checked * 100).toFixed(1)}%)` +
+      `\tdeclared ${d.minX}-${d.maxX},${d.minY}-${d.maxY}` +
+      `\tobserved ${o ? `${o.minX}-${o.maxX},${o.minY}-${o.maxY}` : "none"}\t${text}`
+    );
+    $("copy").disabled = false;
+  }
+
+  function busy(on) {
+    running = on;
+    $("scan").disabled = on;
+    $("scanAll").disabled = on;
+    $("check").disabled = on;
+    $("stop").disabled = !on;
+  }
+
+  async function go(zooms) {
+    const bounds = parseBounds();
+    if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
+    stopped = false;
+    busy(true);
+    try {
+      for (const z of zooms) {
+        if (stopped) break;
+        const r = await scanZoom(z, bounds);
+        if (r) addRow(r);
+      }
+      $("status").textContent = stopped ? "stopped" : "done";
+    } finally {
+      busy(false);
+    }
+  }
+
+  // -- wiring -------------------------------------------------------------
+
+  function refreshZooms() {
+    const bounds = parseBounds();
+    const sel = $("zoom");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    if (!bounds) { $("plan").textContent = "boundsByZoom is not valid JSON"; return; }
+    for (const z of Object.keys(bounds).map(Number).sort((a, b) => a - b)) {
+      const o = document.createElement("option");
+      o.value = z; o.textContent = `z${z}  (${(bounds[z].w * bounds[z].h).toLocaleString()} tiles)`;
+      sel.appendChild(o);
+    }
+    if (prev) sel.value = prev;
+    refreshPlan();
+  }
+
+  function refreshPlan() {
+    const bounds = parseBounds();
+    if (!bounds) return;
+    const z = +$("zoom").value;
+    const b = bounds[z];
+    if (!b) return;
+    const budget = Math.max(100, +$("budget").value || 2500);
+    const { list, stride } = tilesFor(z, b, budget);
+    const secs = list.length / Math.max(1, +$("rps").value || 12);
+    $("plan").textContent =
+      `${list.length.toLocaleString()} requests` +
+      (stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} tile)` : " (every tile)") +
+      ` · about ${secs < 90 ? Math.ceil(secs) + "s" : Math.ceil(secs / 60) + " min"}`;
+  }
+
+  $("bounds").addEventListener("input", refreshZooms);
+  $("zoom").addEventListener("change", refreshPlan);
+  $("budget").addEventListener("input", refreshPlan);
+  $("rps").addEventListener("input", refreshPlan);
+
+  $("scan").addEventListener("click", () => go([+$("zoom").value]));
+  $("scanAll").addEventListener("click", () => {
+    const bounds = parseBounds();
+    if (bounds) go(Object.keys(bounds).map(Number).sort((a, b) => a - b));
+  });
+  $("stop").addEventListener("click", () => { stopped = true; $("status").textContent = "stopping…"; });
+
+  $("copy").addEventListener("click", () => {
+    const text = rows.join("\n");
+    navigator.clipboard.writeText(text).then(
+      () => { $("summary").hidden = false; $("summary").textContent = text; },
+      () => { $("summary").hidden = false; $("summary").textContent = text; }
+    );
+  });
+
+  $("check").addEventListener("click", async () => {
+    const lines = $("spot").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const tasks = [];
+    for (const line of lines) {
+      const p = line.split(/[\/\s,]+/).map(Number);
+      if (p.length >= 3 && p.every(Number.isFinite)) {
+        tasks.push({ z: p[0], x: p[1], y: p[2], url: url(p[0], p[1], p[2]) });
+      }
+    }
+    if (!tasks.length) { $("spotStatus").textContent = "nothing parsed — one z/x/y per line"; return; }
+
+    const table = $("spotResults");
+    table.hidden = false;
+    table.tBodies[0].innerHTML = "";
+    stopped = false;
+    busy(true);
+    let loaded = 0;
+    await runQueue(tasks, (t, res) => {
+      if (res === "ok") loaded++;
+      const tr = document.createElement("tr");
+      const cls = res === "ok" ? "bad" : "ok";  // a tile that LOADS here is the bad news
+      const label = res === "ok" ? "loads fine" : res === "timeout" ? "timed out" : "no tile";
+      tr.innerHTML =
+        `<td class="mono">${t.z}/${t.x}/${t.y}</td>` +
+        `<td class="${cls}">${label}</td>` +
+        `<td class="mono muted">${t.url}</td>`;
+      table.tBodies[0].appendChild(tr);
+    });
+    busy(false);
+    $("spotStatus").innerHTML = loaded
+      ? `<span class="bad">${loaded} of ${tasks.length} loaded fine — those were not really missing.</span>`
+      : `<span class="ok">none of the ${tasks.length} loaded — they are genuinely absent.</span>`;
+  });
+
+  refreshZooms();
+})();
+</script>
+</body>
+</html>
