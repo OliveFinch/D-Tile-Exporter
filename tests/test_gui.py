@@ -344,3 +344,136 @@ def test_spec_keeps_the_qt_modules_plugins_may_need():
     text = spec.read_text()
     for module in ("QtSvg", "QtOpenGL", "QtNetwork", "QtDBus"):
         assert f'"PySide6.{module}"' not in text, f"{module} must not be excluded"
+
+
+# ---------------------------------------------------------------------------
+# measuring bounds from the server
+# ---------------------------------------------------------------------------
+
+
+def test_measure_button_reports_differences_and_offers_json(qapp, context, monkeypatch):
+    """The GUI wiring around discovery; the search itself is tested elsewhere."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from tilearc.config import TileBounds
+    from tilearc.discover import ZoomMeasurement
+    import tilearc_gui.doctor_tab as module
+
+    tab = DoctorTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+
+    fake = [
+        ZoomMeasurement(11, TileBounds(555, 564, 851, 859), TileBounds(555, 564, 851, 859)),
+        ZoomMeasurement(12, TileBounds(1118, 1125, 1706, 1715),
+                        TileBounds(1114, 1125, 1706, 1715), requests=40),
+    ]
+    async def fake_discover(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(module, "discover", fake_discover)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+
+    shown: list[str] = []
+    monkeypatch.setattr(module.DoctorTab, "_show_result", lambda self, text: shown.append(text))
+
+    tab._measure()
+    drain(qapp)
+
+    assert shown, "no result was shown"
+    text = shown[0]
+    assert "1114-1125" in text
+    assert "minX" in text
+    assert '"12": { "minX": 1114' in text          # pasteable block
+    assert "1 zoom(s) differ" in tab.summary_label.text()
+    assert tab.measure_button.isEnabled()
+
+
+def test_measure_button_says_nothing_to_do_when_the_config_is_right(
+    qapp, context, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    from tilearc.config import TileBounds
+    from tilearc.discover import ZoomMeasurement
+    import tilearc_gui.doctor_tab as module
+
+    tab = DoctorTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "hkdl")
+
+    same = TileBounds(13380, 13383, 7148, 7150)
+    async def fake_discover(*args, **kwargs):
+        return [ZoomMeasurement(14, same, same)]
+
+    monkeypatch.setattr(module, "discover", fake_discover)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(module.DoctorTab, "_show_result", lambda self, text: None)
+
+    tab._measure()
+    drain(qapp)
+    assert "matches the server exactly" in tab.summary_label.text()
+
+
+def test_measure_refuses_a_park_with_no_public_template(qapp, context, monkeypatch):
+    """TDR cannot be probed -- it needs credentials and a proxy."""
+    from PySide6.QtWidgets import QMessageBox
+
+    import tilearc_gui.doctor_tab as module
+
+    tab = DoctorTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "tdr")
+
+    told: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda parent, title, text, *a, **k: told.append(text)
+    )
+    called = []
+
+    async def fake_discover(*args, **kwargs):
+        called.append(1)
+        return []
+
+    monkeypatch.setattr(module, "discover", fake_discover)
+
+    tab._measure()
+    drain(qapp)
+
+    assert called == [], "must not probe a credential-gated park"
+    assert told and "no public tile template" in told[0]
+
+
+def test_measure_asks_before_spending_requests(qapp, context, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    import tilearc_gui.doctor_tab as module
+
+    tab = DoctorTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "hkdl")
+
+    asked: list[str] = []
+
+    def question(parent, title, text, *args, **kwargs):
+        asked.append(text)
+        return QMessageBox.Cancel
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    called = []
+
+    async def fake_discover(*args, **kwargs):
+        called.append(1)
+        return []
+
+    monkeypatch.setattr(module, "discover", fake_discover)
+
+    tab._measure()
+    drain(qapp)
+
+    assert called == [], "cancelling must not send any requests"
+    assert asked and "requests" in asked[0]

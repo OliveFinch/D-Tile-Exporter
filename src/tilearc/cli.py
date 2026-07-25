@@ -11,8 +11,16 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import USER_AGENT, __version__
-from .bounds import BBox
+from .bounds import BBox, select_zooms
 from .config import ParkRepository, build_repository
+from .discover import (
+    ProbeOptions,
+    bounds_block,
+    discover,
+    estimate_requests,
+    measurements_to_json,
+    patch_config_text,
+)
 from .doctor import check_park, worst_severity
 from .downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
 from .errors import ConfigError, QuotaError, TilearcError
@@ -269,6 +277,126 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             )
 
     return 1 if worst_severity(findings) == "error" and args.strict else 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    repo = repository_from(args)
+    park = repo.park(args.park)
+    version = repo.version(args.park, args.version)
+
+    if not park.tile_template and not version.url:
+        raise TilearcError(
+            f"'{park.park_id}' has no public tile template, so its bounds cannot "
+            f"be measured by this command."
+        )
+
+    selection = select_zooms(park, args.min_zoom, args.max_zoom)
+    zooms = [(z, park.bounds_at(z)) for z in selection.zooms if park.bounds_at(z)]
+    if not zooms:
+        raise TilearcError("no zoom levels with bounds to measure")
+
+    options = ProbeOptions(
+        samples=args.samples, concurrency=args.concurrency, rps=args.rps,
+        max_expand=args.max_expand,
+    )
+    upper_bound = estimate_requests(len(zooms), options)
+
+    info(f"park     {park.park_id}  {park.label}")
+    info(f"version  {version.code}")
+    info(f"zooms    {', '.join(str(z) for z, _b in zooms)}")
+    info(
+        f"cost     up to about {upper_bound:,} requests "
+        f"(far fewer if the declared bounds are already right)"
+    )
+    info(f"polite   concurrency {options.concurrency}, {options.rps:g} req/s")
+    info("")
+
+    if args.dry_run:
+        info("dry run -- stopping before any request")
+        return 0
+    if not _confirm("Measure the real tile bounds from the server?", args.yes):
+        info("aborted")
+        return 1
+
+    source = build_source(park, version)
+    progress = Progress(upper_bound, enabled=not args.no_progress)
+
+    measurements = asyncio.run(
+        discover(
+            source,
+            zooms,
+            options,
+            on_request=lambda: progress.update(ok=1),
+            on_zoom_done=lambda m: None,
+        )
+    )
+    progress.close()
+
+    total_requests = sum(m.requests for m in measurements)
+    changed = [m for m in measurements if m.changed]
+
+    if args.json:
+        emit_json(
+            {
+                "park": park.park_id,
+                "version": version.code,
+                "requests": total_requests,
+                "boundsByZoom": measurements_to_json(measurements),
+                "changes": {
+                    str(m.zoom): {
+                        "declared": m.declared.as_dict() if m.declared else None,
+                        "measured": m.measured.as_dict() if m.measured else None,
+                        "tileDelta": m.tile_delta,
+                    }
+                    for m in changed
+                },
+            }
+        )
+        return 0
+
+    info("")
+    info(f"{'zoom':>5}  {'declared':<28} {'measured':<28} change")
+    for m in measurements:
+        declared = (
+            f"{m.declared.min_x}-{m.declared.max_x},{m.declared.min_y}-{m.declared.max_y}"
+            if m.declared else "-"
+        )
+        measured = (
+            f"{m.measured.min_x}-{m.measured.max_x},{m.measured.min_y}-{m.measured.max_y}"
+            if m.measured else "-"
+        )
+        info(f"{m.zoom:>5}  {declared:<28} {measured:<28} {m.describe_change()}")
+        for note in m.notes:
+            info(f"{'':>5}  note: {note}")
+
+    info("")
+    info(f"{total_requests:,} requests, {len(changed)} zoom(s) differ from the config")
+
+    if not changed:
+        info("The declared bounds match the server exactly. Nothing to change.")
+        return 0
+
+    delta = sum(m.tile_delta for m in measurements)
+    info(f"net change to a full-depth job: {delta:+,} tiles")
+
+    if args.write:
+        target = Path(repo.source.describe()) / park.park_id / f"{park.park_id}_config.json"
+        if not target.is_file():
+            raise TilearcError(
+                f"--write needs a local checkout; {target} does not exist. "
+                f"Re-run with --config-dir pointing at the viewer repo."
+            )
+        original = target.read_text(encoding="utf-8")
+        target.write_text(
+            patch_config_text(original, measurements, version.code), encoding="utf-8"
+        )
+        info(f"\nupdated {target}")
+        info("Review the diff, then commit it so both apps pick it up.")
+    else:
+        info("\nPaste this into the park config (or re-run with --write):\n")
+        print(bounds_block(measurements))
+
+    return 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -588,6 +716,40 @@ def build_parser() -> argparse.ArgumentParser:
     download.set_defaults(func=cmd_download)
 
     # verify --------------------------------------------------------------
+    # discover ------------------------------------------------------------
+    discover_parser = subparsers.add_parser(
+        "discover",
+        help="measure the real tile bounds by probing the server",
+        description=(
+            "Finds where tiles actually stop existing, rather than inferring it. "
+            "Anchored on the declared bounds, so it is cheap when they are right."
+        ),
+    )
+    discover_parser.add_argument("--park", required=True)
+    discover_parser.add_argument("--version", required=True)
+    discover_parser.add_argument("--min-zoom", type=int)
+    discover_parser.add_argument("--max-zoom", type=int)
+    discover_parser.add_argument(
+        "--write", action="store_true",
+        help="update the park config in --config-dir with the measured bounds",
+    )
+    discover_parser.add_argument(
+        "--samples", type=int, default=5,
+        help="tiles sampled along a row/column before calling it empty (default 5)",
+    )
+    discover_parser.add_argument(
+        "--max-expand", type=int, default=512,
+        help="how far beyond a declared edge to keep looking (default 512 tiles)",
+    )
+    discover_parser.add_argument("--concurrency", type=int, default=4)
+    discover_parser.add_argument("--rps", type=float, default=8.0)
+    discover_parser.add_argument("-y", "--yes", action="store_true")
+    discover_parser.add_argument("--dry-run", action="store_true")
+    discover_parser.add_argument("--no-progress", action="store_true")
+    discover_parser.add_argument("--json", action="store_true")
+    add_source_args(discover_parser)
+    discover_parser.set_defaults(func=cmd_discover)
+
     verify = subparsers.add_parser("verify", help="check an archive's integrity")
     verify.add_argument("path")
     verify.add_argument(

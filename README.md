@@ -57,6 +57,7 @@ tilearc download --park tdr --version 20260122183830 --mode both --max-zoom 17
 | `versions` | List known version codes for a park, with any per-version URL override |
 | `estimate` | Exact tile count and projected size. Touches no tile server |
 | `doctor` | Report suspicious `boundsByZoom` data. Never rewrites anything |
+| `discover` | Measure the real tile bounds by probing the server |
 | `download` | Archive one version. Resumable, rate-limited, progress-reporting |
 | `verify` | Integrity-check a zip, directory, or mbtiles archive |
 
@@ -179,6 +180,30 @@ dimensions), and TDR (systematically one tile short on max X and max Y at every
 level — `max*2` where it should be `max*2+1`).
 
 `--strict` exits non-zero when errors are found.
+
+## `discover`
+
+`doctor` guesses from geometry. `discover` asks the server:
+
+```bash
+tilearc discover --park wdw --version 801755166           # print the result
+tilearc discover --park wdw --version 801755166 --write   # update the config
+```
+
+For each zoom it verifies the four declared edges, walking outward if there are
+tiles beyond them and inward if the edge is empty. Because it is anchored on
+the declared bounds rather than searching from scratch, confirming a correct
+config is cheap — measuring all ten WDW zoom levels costs about 1,100 requests,
+and probes use `Range: bytes=0-0` so no whole tile is ever downloaded. It prints
+the cost and asks before sending anything.
+
+`--write` replaces `boundsByZoom` in the park config, preserving the file's
+compact one-line style so the diff shows only what changed, and records a
+`boundsMeasured` stamp with the date and the version used. Both this tool and
+the viewer read that file, so a measured config fixes both at once.
+
+What it can't tell you is coverage *inside* the rectangle. The bounding box is
+measurable; holes within it are normal and stay normal.
 
 ## Tokyo Disney Resort
 

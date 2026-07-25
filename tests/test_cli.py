@@ -370,3 +370,141 @@ def test_help_lists_every_command(capsys):
     out = capsys.readouterr().out
     for command in ("download", "estimate", "versions", "verify", "doctor"):
         assert command in out
+
+
+# ---------------------------------------------------------------------------
+# discover
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def probe_server(monkeypatch):
+    """Serve tiles for an explicit truth rectangle per zoom."""
+    import httpx
+
+    truth: dict = {}
+    calls: list = []
+
+    def handler(request):
+        parts = request.url.path.strip("/").removesuffix(".jpg").split("/")
+        z, x, y = int(parts[-3]), int(parts[-2]), int(parts[-1])
+        calls.append((z, x, y))
+        box = truth.get(z)
+        inside = box and box[0] <= x <= box[1] and box[2] <= y <= box[3]
+        return httpx.Response(200, content=b"\xff\xd8ok\xff\xd9") if inside else httpx.Response(404)
+
+    real = httpx.AsyncClient
+
+    class Patched(real):
+        def __init__(self, **kwargs):
+            kwargs.pop("limits", None)
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr("tilearc.discover.httpx.AsyncClient", Patched)
+    return {"truth": truth, "calls": calls}
+
+
+def test_discover_confirms_correct_bounds(capsys, probe_server, fixtures_dir):
+    import json as _json
+    from tilearc.config import DirConfigSource, ParkRepository
+
+    park = ParkRepository(DirConfigSource(fixtures_dir)).park("hkdl")
+    for zoom in (14, 15):
+        bounds = park.bounds_at(zoom)
+        probe_server["truth"][zoom] = (bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y)
+
+    code, out, _err = run(
+        capsys, "discover", "--park", "hkdl", "--version", "19",
+        "--min-zoom", "14", "--max-zoom", "15", "--yes", "--rps", "0",
+        "--no-progress", "--json",
+    )
+    assert code == 0
+    payload = _json.loads(out)
+    assert payload["changes"] == {}
+    assert payload["boundsByZoom"]["14"] == park.bounds_at(14).as_dict()
+
+
+def test_discover_finds_a_too_narrow_edge(capsys, probe_server, fixtures_dir):
+    import json as _json
+    from tilearc.config import DirConfigSource, ParkRepository
+
+    park = ParkRepository(DirConfigSource(fixtures_dir)).park("wdw")
+    declared = park.bounds_at(12)
+    # The real map extends four tiles further west than the config says.
+    probe_server["truth"][12] = (
+        declared.min_x - 4, declared.max_x, declared.min_y, declared.max_y
+    )
+
+    code, out, _err = run(
+        capsys, "discover", "--park", "wdw", "--version", "801755166",
+        "--min-zoom", "12", "--max-zoom", "12", "--yes", "--rps", "0",
+        "--no-progress", "--json",
+    )
+    assert code == 0
+    payload = _json.loads(out)
+    assert payload["boundsByZoom"]["12"]["minX"] == declared.min_x - 4
+    assert payload["changes"]["12"]["tileDelta"] == 4 * declared.height
+
+
+def test_discover_dry_run_sends_nothing(capsys, probe_server):
+    code, _out, err = run(
+        capsys, "discover", "--park", "hkdl", "--version", "19",
+        "--max-zoom", "15", "--dry-run",
+    )
+    assert code == 0
+    assert "dry run" in err
+    assert probe_server["calls"] == []
+
+
+def test_discover_reports_the_cost_before_asking(capsys, probe_server):
+    _code, _out, err = run(
+        capsys, "discover", "--park", "hkdl", "--version", "19",
+        "--max-zoom", "15", "--dry-run",
+    )
+    assert "requests" in err
+    assert "req/s" in err
+
+
+def test_discover_refuses_a_park_with_no_template(capsys, probe_server):
+    code, _out, err = run(
+        capsys, "discover", "--park", "tdr", "--version", "20260122183830", "--yes",
+    )
+    assert code != 0
+    assert "no public tile template" in err
+    assert probe_server["calls"] == []
+
+
+def test_discover_write_updates_the_config(capsys, probe_server, fixtures_dir, tmp_path):
+    import json as _json
+    import shutil
+
+    from tilearc.config import DirConfigSource, ParkRepository
+
+    shutil.copytree(fixtures_dir, tmp_path / "parks")
+    repo_dir = tmp_path / "parks"
+
+    park = ParkRepository(DirConfigSource(repo_dir)).park("wdw")
+    declared = park.bounds_at(12)
+    probe_server["truth"][12] = (
+        declared.min_x - 4, declared.max_x, declared.min_y, declared.max_y
+    )
+
+    code, _out, err = run(
+        capsys, "discover", "--park", "wdw", "--version", "801755166",
+        "--min-zoom", "12", "--max-zoom", "12", "--yes", "--rps", "0",
+        "--no-progress", "--write", "--config-dir", str(repo_dir),
+    )
+    assert code == 0
+    assert "updated" in err
+
+    written = _json.loads((repo_dir / "wdw" / "wdw_config.json").read_text())
+    assert written["boundsByZoom"]["12"]["minX"] == declared.min_x - 4
+    assert written["boundsMeasured"]["version"] == "801755166"
+    # Untouched keys survive.
+    assert written["tileTemplate"] == park.tile_template
+    assert written["defaultCenter"] == [-81.567406, 28.386276]
+
+    # And it reloads through the normal parser.
+    reloaded = ParkRepository(DirConfigSource(repo_dir)).park("wdw")
+    assert reloaded.bounds_at(12).min_x == declared.min_x - 4
