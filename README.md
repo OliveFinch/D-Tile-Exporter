@@ -92,6 +92,7 @@ and the tool version.
 |---|---|---|
 | `--concurrency` | 5 | Warns above 10 |
 | `--rps` | 10 | Global token bucket; `0` disables |
+| `--no-adaptive-rate` | off | Hold `--rps` exactly instead of backing off |
 | `--retries` | 5 | Exponential backoff with jitter, honours `Retry-After` |
 | `--max-tiles` | 250,000 | Refuses larger jobs without `--force` |
 | `--timeout` | 30s | Per request |
@@ -103,6 +104,23 @@ and the tool version.
   one.
 * `download` prints the full plan and asks for confirmation before fetching
   anything (`--yes` to skip, `--dry-run` to stop before it).
+
+### Adaptive rate
+
+By default `--rps` is a **ceiling, not a promise**. Per-tile backoff alone is
+not enough: it makes each individual request retreat after a 429 while the
+token bucket carries on issuing tokens at the full rate, so the job as a whole
+keeps pushing exactly as hard as before — which is how a soft rate-limit turns
+into a block.
+
+Instead, HTTP 429 or 503 halves the job's rate (AIMD, the shape TCP uses) and
+sustained quiet walks it back up in steps until it reaches `--rps` again. A
+cluster of 429s from concurrent workers counts as one event, so N workers do
+not produce N halvings for a single overload. The floor is 1 req/s, and the run
+summary reports how far the rate was cut.
+
+The practical effect is that an optimistic `--rps` costs you time rather than
+access. `--no-adaptive-rate` restores the old fixed-rate behaviour.
 
 ### Resume
 

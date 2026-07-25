@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -24,8 +25,15 @@ from PySide6.QtWidgets import (
 
 from tilearc.config import ParkConfig, VersionEntry
 from tilearc.downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
+from tilearc.errors import QuotaError
 from tilearc.job import JobRequest
 from tilearc.plan import DEFAULT_BYTES_PER_TILE, build_plan
+from tilearc.tdr import (
+    WORKER_TILE_CAP,
+    build_tdr_source,
+    check_worker_quota,
+    load_credentials,
+)
 from tilearc.urls import build_source
 
 from .context import AppContext
@@ -36,6 +44,17 @@ FORMAT_CHOICES = [
     ("dir", "Folder of tiles  —  {z}/{x}/{y}.jpg"),
     ("zip", "Zip archive"),
     ("mbtiles", "MBTiles database"),
+]
+
+MODE_CHOICES = [
+    ("daytime", "Daytime"),
+    ("nighttime", "Nighttime"),
+    ("both", "Both  —  two full sets of tiles"),
+]
+
+ROUTE_CHOICES = [
+    (False, "Through the viewer's Worker  —  shared daily quota"),
+    (True, "Direct from the origin  —  needs CloudFront cookies"),
 ]
 
 #: Above this the UI says something; the library caps hard elsewhere.
@@ -106,6 +125,45 @@ class DownloadTab(QWidget):
 
         outer.addWidget(source_box)
 
+        # -- Tokyo Disney Resort ------------------------------------------
+        # Hidden for every other park. TDR has no public tile URL: it needs a
+        # mode (the map is drawn twice, day and night), a route, and signed
+        # credentials that expire, so none of this belongs in the common path.
+        self.tdr_box = QGroupBox("Tokyo Disney Resort")
+        tdr_form = QFormLayout(self.tdr_box)
+
+        self.tdr_mode = QComboBox()
+        for value, label in MODE_CHOICES:
+            self.tdr_mode.addItem(label, value)
+        self.tdr_mode.currentIndexChanged.connect(self._rebuild_plan)
+        tdr_form.addRow("Map", self.tdr_mode)
+
+        self.tdr_route = QComboBox()
+        for value, label in ROUTE_CHOICES:
+            self.tdr_route.addItem(label, value)
+        self.tdr_route.currentIndexChanged.connect(self._tdr_settings_changed)
+        tdr_form.addRow("Fetch via", self.tdr_route)
+
+        creds_row = QHBoxLayout()
+        self.tdr_credentials = QLineEdit()
+        self.tdr_credentials.setPlaceholderText(
+            "tdr_credentials.json (leave blank to look in the usual places)"
+        )
+        self.tdr_credentials.editingFinished.connect(self._tdr_settings_changed)
+        creds_row.addWidget(self.tdr_credentials, 1)
+        self.tdr_browse = QPushButton("Choose…")
+        self.tdr_browse.clicked.connect(self._choose_credentials)
+        creds_row.addWidget(self.tdr_browse)
+        tdr_form.addRow("Credentials", creds_row)
+
+        self.tdr_status = QLabel("")
+        self.tdr_status.setWordWrap(True)
+        self.tdr_status.setStyleSheet("color: gray;")
+        tdr_form.addRow("", self.tdr_status)
+
+        self.tdr_box.setVisible(False)
+        outer.addWidget(self.tdr_box)
+
         # -- estimate -----------------------------------------------------
         self.estimate_label = QLabel("—")
         self.estimate_label.setTextFormat(Qt.RichText)
@@ -152,6 +210,15 @@ class DownloadTab(QWidget):
         polite_row.addWidget(self.rps)
         polite_row.addStretch(1)
         dest_layout.addLayout(polite_row)
+
+        self.adaptive = QCheckBox("Slow down automatically if the server pushes back")
+        self.adaptive.setChecked(True)
+        self.adaptive.setToolTip(
+            "Treats the rate above as a maximum. On HTTP 429 or 503 the job halves "
+            "its rate and creeps back up once the server settles, so a hopeful "
+            "setting costs you time rather than a block."
+        )
+        dest_layout.addWidget(self.adaptive)
 
         self.politeness_warning = QLabel("")
         self.politeness_warning.setStyleSheet("color: #b36b00;")
@@ -269,6 +336,9 @@ class DownloadTab(QWidget):
             box.blockSignals(False)
 
         self.zoom_hint.setText(f"(this park has {park.min_zoom}–{park.max_zoom})")
+        self.tdr_box.setVisible(park.requires_credentials)
+        if park.requires_credentials:
+            self._refresh_tdr_status()
         self._reload_versions()
 
     @Slot()
@@ -305,9 +375,17 @@ class DownloadTab(QWidget):
             version,
             min_zoom=self.min_zoom.value(),
             max_zoom=self.max_zoom.value(),
+            modes=self._modes(),
         )
         self._show_estimate()
         self._update_destination_label()
+
+    def _modes(self) -> list[str] | None:
+        """The TDR modes to fetch, or None for every other park."""
+        if self.park is None or not self.park.requires_credentials:
+            return None
+        choice = self.tdr_mode.currentData()
+        return ["daytime", "nighttime"] if choice == "both" else [choice]
 
     def _show_estimate(self) -> None:
         plan = self.plan
@@ -329,14 +407,114 @@ class DownloadTab(QWidget):
             lines.append(f"<span style='color:gray;'>{note}</span>")
 
         try:
-            source = build_source(plan.park, plan.version)
-            example = source.url(plan.zooms[0].zoom, plan.zooms[0].bounds.min_x,
-                                 plan.zooms[0].bounds.min_y)
+            sources = self._build_sources()
+            first = next(iter(sources.values()))
+            example = first.url(plan.zooms[0].zoom, plan.zooms[0].bounds.min_x,
+                                plan.zooms[0].bounds.min_y)
             lines.append(f"<span style='color:gray; font-family:monospace;'>{example}</span>")
+            if any(s.uses_shared_proxy for s in sources.values()):
+                lines.append(self._worker_quota_note(plan.total_tiles))
         except Exception as exc:
             lines.append(f"<span style='color:#c0392b;'>{exc}</span>")
 
         self.estimate_label.setText("<br>".join(lines))
+
+    @staticmethod
+    def _worker_quota_note(total_tiles: int) -> str:
+        """Say what a proxied job costs before it is started, not after."""
+        if total_tiles > WORKER_TILE_CAP:
+            return (
+                f"<span style='color:#c0392b;'>{total_tiles:,} tiles through the shared "
+                f"Worker is over the {WORKER_TILE_CAP:,}-tile cap. The Worker also serves "
+                f"live viewer traffic — narrow the zoom range, or fetch directly.</span>"
+            )
+        return (
+            f"<span style='color:gray;'>{total_tiles:,} requests against the shared "
+            f"Worker's daily quota.</span>"
+        )
+
+    # ------------------------------------------------------------------ TDR
+
+    def _credentials_path(self) -> str | None:
+        text = self.tdr_credentials.text().strip()
+        return text or None
+
+    def _build_sources(self) -> dict:
+        """The tile source per mode, mirroring what the CLI builds."""
+        plan = self.plan
+        if plan is None:
+            raise RuntimeError("no plan")
+        if not plan.park.requires_credentials:
+            return {"": build_source(plan.park, plan.version)}
+
+        credentials = load_credentials(plan.park, self._credentials_path())
+        direct = bool(self.tdr_route.currentData())
+        return {
+            mode: build_tdr_source(
+                plan.park, plan.version.code, mode, credentials, direct=direct
+            )
+            for mode in plan.modes
+        }
+
+    @Slot()
+    def _choose_credentials(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose the TDR credentials file", "", "JSON files (*.json);;All files (*)"
+        )
+        if chosen:
+            self.tdr_credentials.setText(chosen)
+            self._tdr_settings_changed()
+
+    @Slot()
+    def _tdr_settings_changed(self) -> None:
+        self._refresh_tdr_status()
+        self._rebuild_plan()
+
+    def _refresh_tdr_status(self) -> None:
+        """Report where the credentials came from and whether they still work.
+
+        Doing this up front matters more here than elsewhere: the failure mode
+        for stale CloudFront cookies routed through the Worker is 204-with-no-
+        body, which is indistinguishable from a genuinely absent tile, so a job
+        with dead credentials looks like a successful download of nothing.
+        """
+        if self.park is None or not self.park.requires_credentials:
+            return
+        try:
+            credentials = load_credentials(self.park, self._credentials_path())
+        except Exception as exc:
+            self.tdr_status.setStyleSheet("color: #c0392b;")
+            self.tdr_status.setText(str(exc))
+            return
+
+        parts = [f"credentials from {credentials.origin}"]
+        colour = "gray"
+
+        expiry = credentials.expiry_warning()
+        if expiry:
+            parts.append(expiry)
+            colour = "#b36b00"
+        try:
+            credentials.check_not_expired()
+        except Exception as exc:
+            parts = [str(exc)]
+            colour = "#c0392b"
+
+        if bool(self.tdr_route.currentData()):
+            try:
+                credentials.require_direct_fields()
+            except Exception as exc:
+                parts.append(str(exc))
+                colour = "#c0392b"
+        elif not credentials.proxy_url:
+            parts.append(
+                "no Worker URL configured — set proxy_url in the credentials file, "
+                "or fetch directly instead"
+            )
+            colour = "#c0392b"
+
+        self.tdr_status.setStyleSheet(f"color: {colour};")
+        self.tdr_status.setText("  ·  ".join(parts))
 
     # ---------------------------------------------------------- destination
 
@@ -391,7 +569,8 @@ class DownloadTab(QWidget):
         self.stop_button.setEnabled(running)
         for widget in (
             self.park_combo, self.version_combo, self.inactive_check,
-            self.min_zoom, self.max_zoom, self.format_combo,
+            self.min_zoom, self.max_zoom, self.format_combo, self.adaptive,
+            self.tdr_mode, self.tdr_route, self.tdr_credentials, self.tdr_browse,
             self.browse_button, self.concurrency, self.rps,
         ):
             widget.setEnabled(not running)
@@ -405,10 +584,28 @@ class DownloadTab(QWidget):
             return
 
         try:
-            sources = {"": build_source(plan.park, plan.version)}
+            sources = self._build_sources()
         except Exception as exc:
             QMessageBox.critical(self, "Cannot build tile URLs", str(exc))
             return
+
+        # The Worker is on a free-tier daily quota and also serves live viewer
+        # traffic, so an oversized proxied run breaks TDR for everyone using the
+        # map today. Same cap the CLI enforces, same escape hatch.
+        if any(s.uses_shared_proxy for s in sources.values()):
+            try:
+                for warning in check_worker_quota(plan.total_tiles, forced=False):
+                    self._note(warning)
+            except QuotaError as exc:
+                proceed = QMessageBox.warning(
+                    self,
+                    "This job would use the shared Worker quota",
+                    f"{exc}\n\nDownload anyway?",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if proceed != QMessageBox.Yes:
+                    return
 
         request = JobRequest(
             plan=plan,
@@ -418,6 +615,7 @@ class DownloadTab(QWidget):
             options=DownloadOptions(
                 concurrency=self.concurrency.value(),
                 rps=float(self.rps.value()),
+                adaptive=self.adaptive.isChecked(),
             ),
         )
 

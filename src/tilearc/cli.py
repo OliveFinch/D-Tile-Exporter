@@ -509,11 +509,13 @@ def cmd_download(args: argparse.Namespace) -> int:
     info("")
     info(f"format   {fmt} -> {output}")
     info(f"state    {state_path}")
-    info(
-        f"polite   concurrency {args.concurrency}, "
-        f"{'no rate cap' if args.rps <= 0 else f'{args.rps:g} req/s'}, "
-        f"{args.retries} retries"
-    )
+    if args.rps <= 0:
+        rate_note = "no rate cap"
+    elif args.adaptive:
+        rate_note = f"up to {args.rps:g} req/s, backing off if pushed back"
+    else:
+        rate_note = f"{args.rps:g} req/s held"
+    info(f"polite   concurrency {args.concurrency}, {rate_note}, {args.retries} retries")
     info(f"agent    {USER_AGENT}")
     info("")
 
@@ -533,6 +535,7 @@ def cmd_download(args: argparse.Namespace) -> int:
     options = DownloadOptions(
         concurrency=args.concurrency,
         rps=args.rps,
+        adaptive=args.adaptive,
         retries=args.retries,
         timeout=args.timeout,
     )
@@ -694,6 +697,10 @@ def build_parser() -> argparse.ArgumentParser:
     politeness.add_argument(
         "--rps", type=float, default=10.0,
         help="global requests/second ceiling, 0 to disable (default 10)",
+    )
+    politeness.add_argument(
+        "--no-adaptive-rate", dest="adaptive", action="store_false",
+        help="hold --rps exactly instead of backing off automatically on 429/503",
     )
     politeness.add_argument("--retries", type=int, default=5, help="retries per tile (default 5)")
     politeness.add_argument("--timeout", type=float, default=30.0, help="per-request timeout")

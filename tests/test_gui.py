@@ -75,14 +75,104 @@ def test_download_tab_lists_parks(qapp, context):
     assert {"wdw", "dlr", "hkdl", "shdr", "dlp"} <= ids
 
 
-def test_tdr_is_not_offered_for_download(qapp, context):
-    """TDR needs credentials and a proxy, which this front-end does not do."""
+def test_tdr_is_offered_for_download(qapp, context):
+    """TDR is credential-gated, but the Download tab now knows how to ask."""
     tab = DownloadTab(context)
     tab.reload_parks()
     drain(qapp)
 
     ids = {tab.park_combo.itemData(i) for i in range(tab.park_combo.count())}
-    assert "tdr" not in ids
+    assert "tdr" in ids
+
+
+# ---------------------------------------------------------------------------
+# TDR
+# ---------------------------------------------------------------------------
+
+
+def _tdr_tab(qapp, context) -> DownloadTab:
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "tdr")
+    drain(qapp)
+    return tab
+
+
+def test_tdr_panel_is_shown_only_for_tdr(qapp, context):
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    assert not tab.tdr_box.isVisibleTo(tab)
+
+    select(tab.park_combo, "tdr")
+    drain(qapp)
+    assert tab.tdr_box.isVisibleTo(tab)
+
+
+def test_tdr_both_modes_doubles_the_job(qapp, context):
+    tab = _tdr_tab(qapp, context)
+
+    select(tab.tdr_mode, "daytime")
+    drain(qapp)
+    assert tab.plan.modes == ["daytime"]
+    single = tab.plan.total_tiles
+
+    select(tab.tdr_mode, "both")
+    drain(qapp)
+    assert tab.plan.modes == ["daytime", "nighttime"]
+    assert tab.plan.total_tiles == single * 2
+
+
+def test_tdr_sources_are_built_per_mode(qapp, context):
+    tab = _tdr_tab(qapp, context)
+    select(tab.tdr_mode, "both")
+    drain(qapp)
+
+    sources = tab._build_sources()
+    assert set(sources) == {"daytime", "nighttime"}
+    # Worker route by default, and the worker's "missing" marker is 204.
+    assert all(s.uses_shared_proxy for s in sources.values())
+    assert all(204 in s.missing_statuses for s in sources.values())
+    assert "daytime" in sources["daytime"].template
+
+
+def test_tdr_direct_route_uses_origin_and_treats_403_as_auth(qapp, context):
+    """403 direct from the origin is a bad signature, not an absent tile."""
+    tab = _tdr_tab(qapp, context)
+    select(tab.tdr_route, True)
+    drain(qapp)
+
+    source = tab._build_sources()["daytime"]
+    assert not source.uses_shared_proxy
+    assert "tokyodisneyresort.jp" in source.template
+    assert 403 in source.auth_statuses
+    assert 403 not in source.missing_statuses
+    assert source.cookies["CloudFront-Policy"] == "FIXTURE-POLICY"
+
+
+def test_tdr_status_reports_where_credentials_came_from(qapp, context):
+    tab = _tdr_tab(qapp, context)
+    assert "tdr_config.json" in tab.tdr_status.text()
+
+
+def test_tdr_missing_credentials_file_is_reported_not_raised(qapp, context):
+    tab = _tdr_tab(qapp, context)
+    tab.tdr_credentials.setText("/nonexistent/tdr_credentials.json")
+    tab._tdr_settings_changed()
+    drain(qapp)
+
+    assert "not found" in tab.tdr_status.text().lower()
+
+
+def test_worker_quota_note_flags_oversized_jobs(qapp, context):
+    from tilearc.tdr import WORKER_TILE_CAP
+
+    assert "over the" in DownloadTab._worker_quota_note(WORKER_TILE_CAP + 1)
+    assert "over the" not in DownloadTab._worker_quota_note(WORKER_TILE_CAP - 1)
 
 
 def test_retired_versions_are_hidden_until_asked_for(qapp, context):

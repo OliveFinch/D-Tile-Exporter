@@ -112,6 +112,17 @@ from those files.
    written is shown underneath.
 4. **Download**.
 
+**Speed.** *Parallel requests* and *Max requests/second* default to 5 and 10,
+which is deliberately gentle — a full-depth park at 10 req/s takes many hours.
+Raising both together is what actually speeds things up; the rate is the
+binding constraint, and raising it without also raising the parallel requests
+just leaves workers waiting. Keep the two roughly in proportion.
+
+Leave **Slow down automatically if the server pushes back** ticked. It turns
+the rate into a ceiling rather than a fixed speed: on HTTP 429 or 503 the job
+halves its rate and creeps back up once the server settles. That way an
+optimistic setting costs you time instead of your access.
+
 The progress bar shows tiles done, bytes, throughput and time remaining, with a
 breakdown of downloaded / already there / no imagery / failed.
 
@@ -184,6 +195,35 @@ Tokyo Disney Resort can't be measured here: it needs credentials and a proxy.
 
 ---
 
+## Tokyo Disney Resort
+
+Pick Tokyo Disney Resort in the Park list and an extra panel appears. TDR has
+no public tile URL, so it needs three things the other parks don't:
+
+- **Map** — the resort is drawn twice, daytime and nighttime. "Both" fetches
+  two complete sets, so it doubles the job.
+- **Fetch via** — the viewer's Cloudflare Worker (the default, and what the
+  live site uses) or direct from the origin. Direct needs all three CloudFront
+  signed cookies and the mobile-app User-Agent.
+- **Credentials** — leave blank to look in the usual places
+  (`./tdr_credentials.json`, the `TILEARC_TDR_*` environment variables, then
+  the park config), or point at a file. The line under the box says where the
+  credentials were found and when they expire.
+
+**Watch the quota.** The Worker is on Cloudflare's free tier — 100,000
+requests a day — and it also serves everyone using the live map. Jobs over
+10,000 tiles are refused unless you confirm, because a full TDR run is ~138,000
+tiles *per mode* and would take the map down for the rest of the day. Fetching
+directly bypasses the Worker entirely and doesn't touch that quota.
+
+**If every tile comes back missing,** the cookies have almost certainly
+expired. Through the Worker an upstream 403 arrives as `204 No Content`, which
+is indistinguishable from a tile that genuinely isn't there — so dead
+credentials look like a successful download of nothing. The app checks expiry
+before starting and says so in the panel.
+
+---
+
 ## Checking it works
 
 The tile arithmetic has known-good answers. Set the zoom range to a park's full
@@ -218,8 +258,5 @@ pytest tests/test_gui.py
 
 Use the `tilearc` command line for:
 
-- **Tokyo Disney Resort** — needs credentials and a proxy, plus the
-  shared-quota guard. The app hides any park with no tile template, which
-  excludes TDR without special-casing it.
 - **`--bbox`** clipping to a geographic area.
 - Scripting anything, via `--json` on most commands.
