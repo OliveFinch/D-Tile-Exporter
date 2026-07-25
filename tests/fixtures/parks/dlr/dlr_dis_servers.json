@@ -1,0 +1,327 @@
+[
+  {
+    "code": "52",
+    "label": "Aug '18",
+    "active": 1
+  },
+  {
+    "code": "53",
+    "label": "Aug '18 (Late)",
+    "active": 1
+  },
+  {
+    "code": "54",
+    "label": "Oct '18",
+    "active": 1
+  },
+  {
+    "code": "55",
+    "label": "Nov '18",
+    "active": 1
+  },
+  {
+    "code": "56",
+    "label": "Dec '18",
+    "active": 1
+  },
+  {
+    "code": "57",
+    "label": "Jan '19",
+    "active": 1
+  },
+  {
+    "code": "58",
+    "label": "Feb '19",
+    "active": 1
+  },
+  {
+    "code": "59",
+    "label": "Mar '19",
+    "active": 1
+  },
+  {
+    "code": "60",
+    "label": "Apr '19",
+    "active": 1
+  },
+  {
+    "code": "61",
+    "label": "May '19",
+    "active": 1
+  },
+  {
+    "code": "62",
+    "label": "May '19 (Late)",
+    "active": 1
+  },
+  {
+    "code": "63",
+    "label": "Jun '19",
+    "active": 1
+  },
+  {
+    "code": "64",
+    "label": "Jul '19",
+    "active": 1
+  },
+  {
+    "code": "65",
+    "label": "Aug '19",
+    "active": 1
+  },
+  {
+    "code": "66",
+    "label": "Aug '19 (Late)",
+    "active": 1
+  },
+  {
+    "code": "67",
+    "label": "Sep '19",
+    "active": 1
+  },
+  {
+    "code": "68",
+    "label": "Oct '19",
+    "active": 1
+  },
+  {
+    "code": "69",
+    "label": "Nov '19",
+    "active": 1
+  },
+  {
+    "code": "70",
+    "label": "Dec '19 (Early)",
+    "active": 1
+  },
+  {
+    "code": "71",
+    "label": "Dec '19 (Late)",
+    "active": 1
+  },
+  {
+    "code": "72",
+    "label": "Dec '19 (Mid)",
+    "active": 1
+  },
+  {
+    "code": "73",
+    "label": "Jan '20",
+    "active": 1
+  },
+  {
+    "code": "74",
+    "label": "Feb '20",
+    "active": 1
+  },
+  {
+    "code": "75",
+    "label": "Mar '20",
+    "active": 1
+  },
+  {
+    "code": "76",
+    "label": "Mar '20 (Late)",
+    "active": 1
+  },
+  {
+    "code": "77",
+    "label": "Apr '20 (Early)",
+    "active": 1
+  },
+  {
+    "code": "78",
+    "label": "Apr '20 (Mid)",
+    "active": 1
+  },
+  {
+    "code": "79",
+    "label": "Apr '20 (Late)",
+    "active": 1
+  },
+  {
+    "code": "80",
+    "label": "May '20",
+    "active": 1
+  },
+  {
+    "code": "81",
+    "label": "May '20 (Late)",
+    "active": 1
+  },
+  {
+    "code": "82",
+    "label": "Jun '20",
+    "active": 1
+  },
+  {
+    "code": "83",
+    "label": "Jul '20",
+    "active": 1
+  },
+  {
+    "code": "84",
+    "label": "Aug '20",
+    "active": 1
+  },
+  {
+    "code": "85",
+    "label": "Sep '20",
+    "active": 1
+  },
+  {
+    "code": "86",
+    "label": "Oct '20",
+    "active": 1
+  },
+  {
+    "code": "87",
+    "label": "Nov '20",
+    "active": 1
+  },
+  {
+    "code": "88",
+    "label": "Nov '20 (Late)",
+    "active": 1
+  },
+  {
+    "code": "89",
+    "label": "Dec '20 (Early)",
+    "active": 1
+  },
+  {
+    "code": "90",
+    "label": "Dec '20 (Late)",
+    "active": 1
+  },
+  {
+    "code": "91",
+    "label": "Dec '20 (Mid)",
+    "active": 1
+  },
+  {
+    "code": "92",
+    "label": "Jan '21",
+    "active": 1
+  },
+  {
+    "code": "93",
+    "label": "Feb '21",
+    "active": 1
+  },
+  {
+    "code": "94",
+    "label": "Feb '21 (Late)",
+    "active": 1
+  },
+  {
+    "code": "95",
+    "label": "Mar '21",
+    "active": 1
+  },
+  {
+    "code": "96",
+    "label": "Mar '21 (Late)",
+    "active": 1
+  },
+  {
+    "code": "97",
+    "label": "Apr '21",
+    "active": 1
+  },
+  {
+    "code": "98",
+    "label": "Apr '21 (Late)",
+    "active": 1
+  },
+  {
+    "code": "134122509",
+    "label": "Jun '21",
+    "active": 1
+  },
+  {
+    "code": "106408991",
+    "label": "Aug '21",
+    "active": 1
+  },
+  {
+    "code": "192349529",
+    "label": "Dec '21",
+    "active": 1
+  },
+  {
+    "code": "320859752",
+    "label": "May '22",
+    "active": 1
+  },
+  {
+    "code": "899648711",
+    "label": "Jul '22",
+    "active": 1
+  },
+  {
+    "code": "484425189",
+    "label": "Nov '22",
+    "active": 1
+  },
+  {
+    "code": "484185324",
+    "label": "Mar '23",
+    "active": 1
+  },
+  {
+    "code": "733174853",
+    "label": "May '23",
+    "active": 1
+  },
+  {
+    "code": "296029809",
+    "label": "Sep '23",
+    "active": 1
+  },
+  {
+    "code": "538595539",
+    "label": "Jan '26",
+    "active": 1
+  },
+  {
+    "code": "407370045",
+    "label": "Feb '26",
+    "active": 1
+  },
+  {
+    "code": "852145096",
+    "label": "Mar '26",
+    "active": 1
+  },
+  {
+    "code": "985518800",
+    "label": "Apr '26",
+    "active": 1
+  },
+  {
+    "code": "429399958",
+    "label": "Apr '26 (Mid)",
+    "active": 1
+  },
+  {
+    "code": "226957684",
+    "label": "May '26",
+    "active": 1
+  },
+  {
+    "code": "140306807",
+    "label": "Jun '26",
+    "active": 1
+  },
+  {
+    "code": "351045300",
+    "label": "Jul '26",
+    "active": 1
+  },
+  {
+    "code": "840388841",
+    "label": "Jul '26 (Late)",
+    "active": 1
+  }
+]
