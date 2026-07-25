@@ -56,6 +56,26 @@ pyinstaller --clean --noconfirm packaging\ParkTileArchiver.spec
 
 You get `dist\ParkTileArchiver\ParkTileArchiver.exe`.
 
+### If the app doesn't start
+
+`build-app.sh` launches the app it just built and fails loudly if it can't
+start, so a broken bundle should never reach you silently. If one does, run the
+executable inside the bundle directly — that prints the real error, which
+double-clicking swallows:
+
+```bash
+"dist/Park Tile Archiver.app/Contents/MacOS/ParkTileArchiver"
+```
+
+To rule out packaging entirely, run the app straight from source:
+
+```bash
+source .venv/bin/activate
+tilearc-gui
+```
+
+If that works and the bundle doesn't, the problem is PyInstaller, not the app.
+
 ### Gatekeeper on first launch
 
 The app isn't code-signed, so macOS may refuse a plain double-click the first

@@ -50,6 +50,31 @@ echo "==> Building"
 rm -rf build dist
 pyinstaller --clean --noconfirm packaging/ParkTileArchiver.spec
 
+# ---------------------------------------------------------------- verify
+#
+# Launch the thing we just built and make sure it can actually start. A bundle
+# that dies on import still builds perfectly happily, and finding that out at
+# double-click time — with no error message anywhere — is miserable.
+
+if [ -d "dist/Park Tile Archiver.app" ]; then
+    BINARY="dist/Park Tile Archiver.app/Contents/MacOS/ParkTileArchiver"
+else
+    BINARY="dist/ParkTileArchiver/ParkTileArchiver"
+fi
+
+echo "==> Checking the built app starts"
+if OUTPUT=$("$BINARY" --self-test 2>&1); then
+    echo "    $OUTPUT"
+else
+    echo
+    echo "!!! The app was built but will not start. Its output was:"
+    echo
+    echo "$OUTPUT" | sed 's/^/    /'
+    echo
+    echo "    Please send that text along — it says exactly what is missing."
+    exit 1
+fi
+
 # ---------------------------------------------------------------- report
 
 if [ -d "dist/Park Tile Archiver.app" ]; then

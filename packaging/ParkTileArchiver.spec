@@ -5,24 +5,34 @@
 # Produces dist/Park Tile Archiver.app on macOS and dist/ParkTileArchiver.exe
 # on Windows. `build-app.sh` wraps this with the venv setup.
 
+import os
 import sys
 
 block_cipher = None
 
+# Paths in a spec resolve against the working directory PyInstaller was invoked
+# from, not against the spec. SPECPATH makes them independent of both.
+HERE = os.path.abspath(SPECPATH)                      # noqa: F821 - PyInstaller global
+PROJECT = os.path.dirname(HERE)
+SOURCE = os.path.join(PROJECT, "src")
+ENTRY = os.path.join(HERE, "launcher.py")
+
 # Qt ships a great deal that a form with a progress bar has no use for.
-# Excluding it keeps the bundle to a sane size.
+#
+# Deliberately conservative: only the large, clearly-unrelated modules are
+# dropped. QtSvg, QtOpenGL, QtNetwork and QtDBus stay in, because the platform
+# plugins and the built-in styles can reach for them, and a bundle that fails
+# to start is far worse than one that is 30 MB bigger.
 EXCLUDES = [
     "PySide6.Qt3DAnimation", "PySide6.Qt3DCore", "PySide6.Qt3DExtras",
     "PySide6.Qt3DInput", "PySide6.Qt3DLogic", "PySide6.Qt3DRender",
     "PySide6.QtBluetooth", "PySide6.QtCharts", "PySide6.QtDataVisualization",
     "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtMultimedia",
-    "PySide6.QtMultimediaWidgets", "PySide6.QtNfc", "PySide6.QtOpenGL",
-    "PySide6.QtOpenGLWidgets", "PySide6.QtPdf", "PySide6.QtPdfWidgets",
+    "PySide6.QtMultimediaWidgets", "PySide6.QtNfc",
     "PySide6.QtPositioning", "PySide6.QtQml", "PySide6.QtQuick",
     "PySide6.QtQuick3D", "PySide6.QtQuickControls2", "PySide6.QtQuickWidgets",
     "PySide6.QtRemoteObjects", "PySide6.QtScxml", "PySide6.QtSensors",
-    "PySide6.QtSerialPort", "PySide6.QtSpatialAudio", "PySide6.QtSql",
-    "PySide6.QtStateMachine", "PySide6.QtSvg", "PySide6.QtSvgWidgets",
+    "PySide6.QtSerialPort", "PySide6.QtSpatialAudio",
     "PySide6.QtTest", "PySide6.QtTextToSpeech", "PySide6.QtUiTools",
     "PySide6.QtWebChannel", "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets", "PySide6.QtWebSockets",
@@ -30,11 +40,19 @@ EXCLUDES = [
 ]
 
 analysis = Analysis(
-    ["../src/tilearc_gui/__main__.py"],
-    pathex=["../src"],
+    [ENTRY],
+    pathex=[SOURCE],
     binaries=[],
     datas=[],
-    hiddenimports=["tilearc", "tilearc_gui"],
+    hiddenimports=[
+        "tilearc",
+        "tilearc_gui",
+        "tilearc_gui.app",
+        "tilearc_gui.main_window",
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=EXCLUDES,

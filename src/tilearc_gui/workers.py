@@ -27,6 +27,11 @@ class _TaskSignals(QObject):
     failed = Signal(str)
 
 
+#: In-flight tasks, so Python cannot collect one while the pool is still
+#: running it. Callers do not have to hold a reference themselves.
+_LIVE_TASKS: set["FunctionTask"] = set()
+
+
 class FunctionTask(QRunnable):
     """Runs ``fn()`` on the thread pool and reports back via signals."""
 
@@ -34,15 +39,30 @@ class FunctionTask(QRunnable):
         super().__init__()
         self._fn = fn
         self.signals = _TaskSignals()
+        # Lifetime is managed by _LIVE_TASKS; letting Qt delete the C++ object
+        # underneath a live Python reference is a crash waiting to happen.
+        self.setAutoDelete(False)
 
     @Slot()
-    def run(self) -> None:  # pragma: no cover - exercised through the UI
+    def run(self) -> None:
         try:
-            result = self._fn()
-        except Exception as exc:
-            self.signals.failed.emit(str(exc) or exc.__class__.__name__)
-        else:
-            self.signals.done.emit(result)
+            try:
+                result = self._fn()
+            except Exception as exc:
+                self._emit(self.signals.failed, str(exc) or exc.__class__.__name__)
+            else:
+                self._emit(self.signals.done, result)
+        finally:
+            _LIVE_TASKS.discard(self)
+
+    @staticmethod
+    def _emit(signal, payload) -> None:
+        try:
+            signal.emit(payload)
+        except RuntimeError:
+            # The receiving widget was destroyed while this work was in flight
+            # -- the window closed mid-load. There is nobody left to tell.
+            pass
 
 
 def run_async(
@@ -50,10 +70,11 @@ def run_async(
     on_done: Callable[[Any], None],
     on_error: Callable[[str], None],
 ) -> FunctionTask:
-    """Start ``fn`` in the background. Keep the returned task referenced."""
+    """Start ``fn`` in the background and deliver the result on the UI thread."""
     task = FunctionTask(fn)
     task.signals.done.connect(on_done)
     task.signals.failed.connect(on_error)
+    _LIVE_TASKS.add(task)
     QThreadPool.globalInstance().start(task)
     return task
 

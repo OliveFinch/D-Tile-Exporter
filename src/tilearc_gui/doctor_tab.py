@@ -35,7 +35,6 @@ class DoctorTab(QWidget):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
-        self._tasks: list = []
         self._build()
         self.context.changed.connect(self.reload_parks)
 
@@ -81,7 +80,7 @@ class DoctorTab(QWidget):
     def reload_parks(self) -> None:
         self.park_combo.clear()
         self.park_combo.addItem("Loading…", None)
-        self._tasks.append(run_async(self.context.all_parks, self._parks_loaded, self._error))
+        run_async(self.context.all_parks, self._parks_loaded, self._error)
 
     def _parks_loaded(self, parks: list[tuple[str, str]]) -> None:
         self.park_combo.clear()
@@ -108,7 +107,7 @@ class DoctorTab(QWidget):
                     continue
             return findings
 
-        self._tasks.append(run_async(work, self._done, self._error))
+        run_async(work, self._done, self._error)
 
     def _done(self, findings: list) -> None:
         self.run_button.setEnabled(True)
