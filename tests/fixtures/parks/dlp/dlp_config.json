@@ -1,0 +1,66 @@
+{
+  "parkId": "dlp",
+  "name": "Disneyland Paris",
+  "enabled": true,
+  "tileTemplate": "https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg",
+  "supportsHistory": false,
+  "versionCheck": false,
+  "minZoom": 13,
+  "maxZoom": 19,
+  "yScheme": "xyz",
+  "defaultCenter": [
+    2.783115,
+    48.869832
+  ],
+  "defaultZoom": 15.3,
+  "boundsByZoom": {
+    "13": {
+      "minX": 4156,
+      "maxX": 4161,
+      "minY": 2816,
+      "maxY": 2819
+    },
+    "14": {
+      "minX": 8312,
+      "maxX": 8323,
+      "minY": 5632,
+      "maxY": 5639
+    },
+    "15": {
+      "minX": 16624,
+      "maxX": 16647,
+      "minY": 11264,
+      "maxY": 11279
+    },
+    "16": {
+      "minX": 33248,
+      "maxX": 33295,
+      "minY": 22528,
+      "maxY": 22559
+    },
+    "17": {
+      "minX": 66496,
+      "maxX": 66591,
+      "minY": 45056,
+      "maxY": 45119
+    },
+    "18": {
+      "minX": 132992,
+      "maxX": 133183,
+      "minY": 90112,
+      "maxY": 90239
+    },
+    "19": {
+      "minX": 265984,
+      "maxX": 266367,
+      "minY": 180224,
+      "maxY": 180479
+    },
+    "20": {
+      "minX": 531968,
+      "maxX": 532735,
+      "minY": 360448,
+      "maxY": 360959
+    }
+  }
+}

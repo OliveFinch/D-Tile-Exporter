@@ -1,0 +1,60 @@
+{
+  "parkId": "dlr",
+  "name": "Disneyland Resort (California)",
+  "enabled": true,
+  "tileTemplate": "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/disneyland/{code}/{z}/{x}/{y}.jpg",
+  "supportsHistory": true,
+  "versionCheck": true,
+  "minZoom": 14,
+  "maxZoom": 20,
+  "yScheme": "xyz",
+  "defaultCenter": [
+    -117.919108,
+    33.80996
+  ],
+  "defaultZoom": 16.0,
+  "boundsByZoom": {
+    "14": {
+      "minX": 2818,
+      "maxX": 2831,
+      "minY": 6549,
+      "maxY": 6560
+    },
+    "15": {
+      "minX": 5636,
+      "maxX": 5663,
+      "minY": 13102,
+      "maxY": 13117
+    },
+    "16": {
+      "minX": 11272,
+      "maxX": 11327,
+      "minY": 26208,
+      "maxY": 26231
+    },
+    "17": {
+      "minX": 22544,
+      "maxX": 22655,
+      "minY": 52416,
+      "maxY": 52463
+    },
+    "18": {
+      "minX": 45088,
+      "maxX": 45311,
+      "minY": 104832,
+      "maxY": 104927
+    },
+    "19": {
+      "minX": 90176,
+      "maxX": 90623,
+      "minY": 209664,
+      "maxY": 209855
+    },
+    "20": {
+      "minX": 180352,
+      "maxX": 181247,
+      "minY": 419328,
+      "maxY": 419739
+    }
+  }
+}

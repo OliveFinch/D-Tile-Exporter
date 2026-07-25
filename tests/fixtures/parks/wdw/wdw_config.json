@@ -1,0 +1,78 @@
+{
+  "parkId": "wdw",
+  "name": "Walt Disney World",
+  "enabled": true,
+  "tileTemplate": "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg",
+  "supportsHistory": true,
+  "versionCheck": true,
+  "minZoom": 11,
+  "maxZoom": 20,
+  "yScheme": "xyz",
+  "defaultCenter": [
+    -81.567406,
+    28.386276
+  ],
+  "defaultZoom": 13,
+  "boundsByZoom": {
+    "11": {
+      "minX": 555,
+      "maxX": 564,
+      "minY": 851,
+      "maxY": 859
+    },
+    "12": {
+      "minX": 1118,
+      "maxX": 1125,
+      "minY": 1706,
+      "maxY": 1715
+    },
+    "13": {
+      "minX": 2228,
+      "maxX": 2251,
+      "minY": 3412,
+      "maxY": 3431
+    },
+    "14": {
+      "minX": 4456,
+      "maxX": 4503,
+      "minY": 6824,
+      "maxY": 6863
+    },
+    "15": {
+      "minX": 8928,
+      "maxX": 8987,
+      "minY": 13672,
+      "maxY": 13699
+    },
+    "16": {
+      "minX": 17856,
+      "maxX": 17975,
+      "minY": 27344,
+      "maxY": 27399
+    },
+    "17": {
+      "minX": 35712,
+      "maxX": 35951,
+      "minY": 54688,
+      "maxY": 54799
+    },
+    "18": {
+      "minX": 71424,
+      "maxX": 71903,
+      "minY": 109376,
+      "maxY": 109599
+    },
+    "19": {
+      "minX": 143264,
+      "maxX": 143455,
+      "minY": 218752,
+      "maxY": 219199
+    },
+    "20": {
+      "minX": 286528,
+      "maxX": 286911,
+      "minY": 437504,
+      "maxY": 438399
+    }
+  }
+}

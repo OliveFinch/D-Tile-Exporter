@@ -1,0 +1,94 @@
+{
+  "parkId": "shdr",
+  "name": "Shanghai Disney Resort",
+  "enabled": true,
+  "tileTemplate": "https://secure.cdn1.wdpromedia.com/media/maps/prod/shdr-baidu-mob-en/{code}/{z}/{x}/{y}.jpg",
+  "supportsHistory": true,
+  "versionCheck": true,
+  "minZoom": 14,
+  "maxZoom": 21,
+  "yScheme": "tms",
+  "defaultCenter": [
+    -107.344044,
+    -83.052335
+  ],
+  "defaultZoom": 17.8,
+  "realCenter": [
+    121.658,
+    31.1433
+  ],
+  "boundsByZoom": {
+    "9": {
+      "minX": 103,
+      "maxX": 103,
+      "minY": 27,
+      "maxY": 27
+    },
+    "10": {
+      "minX": 206,
+      "maxX": 206,
+      "minY": 55,
+      "maxY": 55
+    },
+    "11": {
+      "minX": 412,
+      "maxX": 413,
+      "minY": 110,
+      "maxY": 111
+    },
+    "12": {
+      "minX": 825,
+      "maxX": 827,
+      "minY": 220,
+      "maxY": 222
+    },
+    "13": {
+      "minX": 1651,
+      "maxX": 1655,
+      "minY": 441,
+      "maxY": 444
+    },
+    "14": {
+      "minX": 3302,
+      "maxX": 3310,
+      "minY": 882,
+      "maxY": 889
+    },
+    "15": {
+      "minX": 6609,
+      "maxX": 6617,
+      "minY": 1768,
+      "maxY": 1776
+    },
+    "16": {
+      "minX": 13218,
+      "maxX": 13235,
+      "minY": 3536,
+      "maxY": 3553
+    },
+    "17": {
+      "minX": 26447,
+      "maxX": 26459,
+      "minY": 7084,
+      "maxY": 7095
+    },
+    "18": {
+      "minX": 52895,
+      "maxX": 52919,
+      "minY": 14168,
+      "maxY": 14191
+    },
+    "19": {
+      "minX": 105791,
+      "maxX": 105839,
+      "minY": 28336,
+      "maxY": 28383
+    },
+    "20": {
+      "minX": 211583,
+      "maxX": 211679,
+      "minY": 56672,
+      "maxY": 56767
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "parkId": "tdr",
+  "name": "Tokyo Disney Resort",
+  "enabled": true,
+  "supportsHistory": false,
+  "versionCheck": false,
+  "minZoom": 16,
+  "maxZoom": 20,
+  "yScheme": "xyz",
+  "defaultCenter": [
+    139.879544,
+    35.634312
+  ],
+  "defaultZoom": 18.5,
+  "defaultWidth": 0.0022,
+  "defaultRotation": 205,
+  "boundsByZoom": {
+    "15": {
+      "minX": 29115,
+      "maxX": 29125,
+      "minY": 12905,
+      "maxY": 12915
+    },
+    "16": {
+      "minX": 58230,
+      "maxX": 58250,
+      "minY": 25810,
+      "maxY": 25830
+    },
+    "17": {
+      "minX": 116460,
+      "maxX": 116500,
+      "minY": 51620,
+      "maxY": 51660
+    },
+    "18": {
+      "minX": 232920,
+      "maxX": 233000,
+      "minY": 103240,
+      "maxY": 103320
+    },
+    "19": {
+      "minX": 465840,
+      "maxX": 466000,
+      "minY": 206480,
+      "maxY": 206640
+    },
+    "20": {
+      "minX": 931680,
+      "maxX": 932000,
+      "minY": 412960,
+      "maxY": 413280
+    }
+  },
+  "tileBaseUrl": "https://contents-portal.tokyodisneyresort.jp/limited/map-image/{serverId}/{mode}/",
+  "userAgent": "TokyoDisneyResortApp/3.11.8 Android/14 sdk_gphone64_arm64",
+  "cookies": {
+    "CloudFront-Policy": "FIXTURE-POLICY",
+    "CloudFront-Signature": "FIXTURE-SIGNATURE",
+    "CloudFront-Key-Pair-Id": "FIXTUREKEYPAIRID"
+  },
+  "cookieExpires": "2099-01-01T00:00:00Z",
+  "proxyUrl": "https://example-worker.workers.dev/tdr-tiles/"
+}

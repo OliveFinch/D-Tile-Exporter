@@ -1,0 +1,60 @@
+{
+  "parkId": "hkdl",
+  "name": "Hong Kong Disneyland",
+  "enabled": true,
+  "tileTemplate": "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/hkdl/{code}/{z}/{x}/{y}.jpg",
+  "supportsHistory": true,
+  "versionCheck": true,
+  "minZoom": 14,
+  "maxZoom": 20,
+  "yScheme": "xyz",
+  "defaultCenter": [
+    114.041267,
+    22.312071
+  ],
+  "defaultZoom": 17.6,
+  "boundsByZoom": {
+    "14": {
+      "minX": 13380,
+      "maxX": 13383,
+      "minY": 7148,
+      "maxY": 7150
+    },
+    "15": {
+      "minX": 26762,
+      "maxX": 26765,
+      "minY": 14297,
+      "maxY": 14300
+    },
+    "16": {
+      "minX": 53524,
+      "maxX": 53531,
+      "minY": 28594,
+      "maxY": 28601
+    },
+    "17": {
+      "minX": 107048,
+      "maxX": 107063,
+      "minY": 57188,
+      "maxY": 57203
+    },
+    "18": {
+      "minX": 214096,
+      "maxX": 214127,
+      "minY": 114376,
+      "maxY": 114407
+    },
+    "19": {
+      "minX": 428192,
+      "maxX": 428255,
+      "minY": 228752,
+      "maxY": 228815
+    },
+    "20": {
+      "minX": 856384,
+      "maxX": 856511,
+      "minY": 457504,
+      "maxY": 457631
+    }
+  }
+}

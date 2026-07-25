@@ -1,0 +1,13 @@
+[
+  {
+    "code": "jan2026",
+    "label": "Jan 2026",
+    "active": 1,
+    "url": "https://pub-1cabc88e998040dba247306dbb5a0e15.r2.dev/dlp/{z}/{x}/{y}.jpg"
+  },
+  {
+    "code": "current",
+    "label": "Current",
+    "active": 1
+  }
+]

@@ -1,0 +1,40 @@
+# --- Credentials: never commit these -----------------------------------
+# TDR CloudFront signed cookies / proxy details are time-limited secrets.
+tdr_credentials.json
+*credentials*.json
+*credentials*.toml
+*.credentials
+.env
+.env.*
+
+# ...but the fill-in-the-blanks templates are safe to track.
+!*.example.json
+!.env.example
+
+# --- tilearc working state / output ------------------------------------
+*.tilearc-state.sqlite
+*.tilearc-state.sqlite-wal
+*.tilearc-state.sqlite-shm
+*.parts/
+*.mbtiles
+/archives/
+/out/
+
+# --- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Editors / OS -------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
