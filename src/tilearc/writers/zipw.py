@@ -75,7 +75,9 @@ class ZipWriter(TileWriter):
 
         tmp.replace(self.output)
         if not self.keep_staging:
-            shutil.rmtree(root.parent, ignore_errors=True)
+            # The staging directory itself -- never `root.parent`, which is now
+            # the folder the archive lives in.
+            shutil.rmtree(self.staging, ignore_errors=True)
         return self.output
 
     def abort(self) -> None:

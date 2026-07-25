@@ -19,7 +19,11 @@ class DirWriter(TileWriter):
 
     def __init__(self, output: Path, plan) -> None:
         super().__init__(output, plan)
-        self.root = self.output / plan.slug
+        # `output` *is* the archive directory. It used to have the job slug
+        # appended, which produced `wdw_47/wdw_47/...` whenever the caller had
+        # already named the directory after the job -- which the default output
+        # path does.
+        self.root = self.output
         self._made: set[Path] = set()
 
     def open(self) -> None:

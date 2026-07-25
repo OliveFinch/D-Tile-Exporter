@@ -14,6 +14,12 @@ archive so the history survives.
 > backoff, and resume state good enough that a re-run never re-fetches
 > anything — including tiles already known to be absent.
 
+There are two front-ends over the same engine:
+
+* **`tilearc`** — the command line, documented below.
+* **Park Tile Archiver** — a desktop app for macOS and Windows. Build it with
+  `./build-app.sh`; see **[GUI.md](GUI.md)**.
+
 ---
 
 ## Install
@@ -67,6 +73,10 @@ read them directly:
 {park}_{version}/{z}/{x}/{y}.jpg
 {park}_{version}/manifest.json
 ```
+
+`-o` names the artefact itself for every format — `-o out` with `--format dir`
+writes the tiles into `out/`, not `out/{park}_{version}/`. Without `-o` the
+default is `{park}_{version}` with the appropriate extension.
 
 With `--mode both` (TDR only) a `{mode}/` level is inserted above `{z}`.
 
@@ -239,6 +249,10 @@ configs (with TDR credentials replaced by placeholders), so the URL-building and
 bounds-iteration logic is tested against the actual quirks — including the TMS
 handling, the per-version `url` override, and every anomaly `doctor` reports.
 See `tests/fixtures/README.md`.
+
+`tests/test_gui.py` builds the desktop app's real widgets under Qt's
+`offscreen` platform, so the window is constructed and interrogated without a
+display. It is skipped automatically if the `gui` extra isn't installed.
 
 ## Exit codes
 

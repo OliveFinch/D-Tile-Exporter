@@ -71,7 +71,8 @@ def test_version_codes_are_sanitised_for_paths(repo):
 
 
 def test_dir_writer_layout(plan, tmp_path):
-    writer = build_writer("dir", tmp_path / "out", plan)
+    """`output` is the archive directory itself, not a container for it."""
+    writer = build_writer("dir", tmp_path / "out" / "hkdl_19", plan)
     writer.open()
     fill(writer, plan)
     root = writer.finalize(manifest_for(plan))
