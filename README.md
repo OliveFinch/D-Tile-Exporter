@@ -252,7 +252,9 @@ See `tests/fixtures/README.md`.
 
 `tests/test_gui.py` builds the desktop app's real widgets under Qt's
 `offscreen` platform, so the window is constructed and interrogated without a
-display. It is skipped automatically if the `gui` extra isn't installed.
+display. It also guards the packaging invariants — PyInstaller's entry point
+must avoid relative imports, or the bundle builds happily with no Qt in it and
+dies on launch. Skipped automatically if the `gui` extra isn't installed.
 
 ## Exit codes
 

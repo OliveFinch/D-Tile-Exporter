@@ -51,7 +51,6 @@ class DownloadTab(QWidget):
         self.plan = None
         self.destination: Path | None = None
 
-        self._tasks: list = []          # keep background tasks referenced
         self._thread: QThread | None = None
         self._worker: DownloadWorker | None = None
         # Bumped on every load so a slow reply from a source the user has
@@ -208,12 +207,10 @@ class DownloadTab(QWidget):
         self.park_combo.blockSignals(False)
         self.park_combo.setEnabled(False)
 
-        self._tasks.append(
-            run_async(
-                self.context.downloadable_park_ids,
-                lambda parks, g=generation: self._parks_loaded(parks, g),
-                lambda message, g=generation: self._load_failed(message, g),
-            )
+        run_async(
+            self.context.downloadable_park_ids,
+            lambda parks, g=generation: self._parks_loaded(parks, g),
+            lambda message, g=generation: self._load_failed(message, g),
         )
 
     def _parks_loaded(self, parks: list[tuple[str, str]], generation: int) -> None:
@@ -248,12 +245,10 @@ class DownloadTab(QWidget):
             repository = self.context.repository()
             return repository.park(park_id), repository.versions(park_id)
 
-        self._tasks.append(
-            run_async(
-                load,
-                lambda payload, g=generation: self._park_loaded(payload, g),
-                lambda message, g=generation: self._load_failed(message, g),
-            )
+        run_async(
+            load,
+            lambda payload, g=generation: self._park_loaded(payload, g),
+            lambda message, g=generation: self._load_failed(message, g),
         )
 
     def _park_loaded(self, payload, generation: int) -> None:

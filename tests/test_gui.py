@@ -286,3 +286,61 @@ def test_switching_source_mid_load_is_not_ignored(qapp, context, fixtures_dir):
     ids = {tab.park_combo.itemData(i) for i in range(tab.park_combo.count())}
     assert "wdw" in ids
     assert None not in ids, "the 'Loading…' placeholder was left behind"
+
+
+# ---------------------------------------------------------------------------
+# packaging invariants
+# ---------------------------------------------------------------------------
+
+
+def test_self_test_flag_builds_a_window_and_exits():
+    """`build-app.sh` relies on this to prove a bundle can actually start.
+
+    Run in a subprocess: `main` creates its own QApplication, and a second one
+    in this process is an error.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "tilearc_gui", "--self-test"],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "self-test ok" in result.stdout
+
+
+def test_packaged_entry_point_avoids_relative_imports():
+    """PyInstaller runs its entry script with no parent package.
+
+    Pointing it at `tilearc_gui/__main__.py` makes `from .app import main` an
+    illegal relative import -- and the same failure during analysis means Qt is
+    silently left out of the bundle, so the app dies instantly on launch.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    launcher = (root / "packaging" / "launcher.py").read_text()
+    assert "from tilearc_gui.app import main" in launcher
+    # Check the code, not the docstring that explains why.
+    code = [
+        line for line in launcher.splitlines()
+        if line.startswith(("import ", "from "))
+    ]
+    assert code and not any(line.startswith("from .") for line in code)
+
+    spec = (root / "packaging" / "ParkTileArchiver.spec").read_text()
+    assert 'ENTRY = os.path.join(HERE, "launcher.py")' in spec
+    assert "__main__.py" not in spec
+    # Paths must not be relative to the invoking directory.
+    assert '"../src' not in spec
+
+
+def test_spec_keeps_the_qt_modules_plugins_may_need():
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "ParkTileArchiver.spec")
+    text = spec.read_text()
+    for module in ("QtSvg", "QtOpenGL", "QtNetwork", "QtDBus"):
+        assert f'"PySide6.{module}"' not in text, f"{module} must not be excluded"

@@ -26,7 +26,6 @@ class VerifyTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.path: Path | None = None
-        self._tasks: list = []
         self._build()
 
     def _build(self) -> None:
@@ -103,9 +102,7 @@ class VerifyTab(QWidget):
         self.summary_label.setText("Checking…")
         self.output.clear()
 
-        self._tasks.append(
-            run_async(lambda: verify_archive(path, deep=deep), self._done, self._error)
-        )
+        run_async(lambda: verify_archive(path, deep=deep), self._done, self._error)
 
     def _done(self, report) -> None:
         self.verify_button.setEnabled(True)
