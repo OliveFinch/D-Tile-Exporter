@@ -58,11 +58,13 @@
   .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
   .muted { color: var(--muted); }
   .note { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
-  #status { font-variant-numeric: tabular-nums; }
+  #status, #plan { font-variant-numeric: tabular-nums; }
   pre {
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
     padding: 12px; overflow-x: auto; font-size: 12px; margin: 10px 0 0;
   }
+  .modes { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 4px; }
+  .modes label { display: flex; gap: 6px; align-items: baseline; color: var(--fg); font-size: 13px; margin: 0; }
 </style>
 </head>
 <body>
@@ -70,9 +72,10 @@
 
 <h1>Tile coverage checker</h1>
 <p class="sub">
-  Loads tiles straight from the CDN in your browser and maps which ones actually
-  exist. Answers two questions: where does the imagery really stop, and how much
-  of the declared rectangle is empty.
+  Loads tiles straight from the CDN in your browser to answer two separate
+  questions: <b>where does the imagery stop</b>, and <b>how much of the declared
+  rectangle is actually empty</b>. The first needs a few hundred requests. The
+  second needs a sample, not a full sweep.
 </p>
 
 <fieldset>
@@ -89,14 +92,38 @@
       <label for="rps">Requests/sec</label>
       <input type="number" id="rps" value="12" min="1" max="60" style="width:90px">
     </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>What to run</legend>
+  <div class="modes">
+    <label><input type="radio" name="mode" value="edges" checked> <span><b>Edges + density</b> — a few hundred requests</span></label>
+    <label><input type="radio" name="mode" value="full"> <span><b>Full coverage map</b> — slow, shows the shape</span></label>
+  </div>
+  <div class="row" style="margin-top:12px">
     <div>
-      <label for="conc">Parallel</label>
-      <input type="number" id="conc" value="6" min="1" max="24" style="width:90px">
+      <label for="samples">Samples per line</label>
+      <input type="number" id="samples" value="12" min="3" max="40" style="width:100px">
+    </div>
+    <div>
+      <label for="density">Density samples</label>
+      <input type="number" id="density" value="400" min="50" max="3000" style="width:110px">
+    </div>
+    <div>
+      <label for="budget">Full-map budget</label>
+      <input type="number" id="budget" value="2500" min="100" max="40000" style="width:120px">
     </div>
   </div>
   <p class="note">
-    Keep these gentle — this is someone else's production CDN, and the whole point
-    is to find out what's there without getting blocked.
+    <b>Edges</b> walks in from each declared edge until it finds a line holding at
+    least one tile — the same method <span class="mono">discover</span> uses, run
+    from a browser as an independent check. A line that looks empty is retested
+    four times as finely before it is believed, because evenly-spaced sampling
+    steps straight over thin features and near an edge is where coverage is
+    thinnest. <b>Density</b> is a uniform random sample of the box: 400 samples
+    pins the fill rate to about ±5%, and scanning more changes that answer very
+    little.
   </p>
 </fieldset>
 
@@ -117,12 +144,8 @@
 }</textarea>
   <div class="row" style="margin-top:12px">
     <div>
-      <label for="zoom">Zoom to scan</label>
+      <label for="zoom">Zoom</label>
       <select id="zoom"></select>
-    </div>
-    <div>
-      <label for="budget">Max requests</label>
-      <input type="number" id="budget" value="2500" min="100" max="40000" style="width:110px">
     </div>
     <div>
       <label>&nbsp;</label>
@@ -130,24 +153,19 @@
     </div>
   </div>
   <div class="actions">
-    <button id="scan">Scan this zoom</button>
-    <button id="scanAll" class="secondary">Scan every zoom</button>
+    <button id="scan">Run this zoom</button>
+    <button id="scanAll" class="secondary">Run every zoom</button>
     <button id="stop" class="secondary" disabled>Stop</button>
     <span id="status" class="muted"></span>
   </div>
-  <p class="note">
-    Over the budget it samples on a stride rather than scanning every tile, so the
-    edges it reports are accurate to within that stride. Low zooms are small enough
-    to scan completely — z11 is 90 tiles.
-  </p>
 </fieldset>
 
 <h2>Coverage map</h2>
-<canvas id="map" width="600" height="300"></canvas>
+<canvas id="map" width="600" height="240"></canvas>
 <div class="legend">
   <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
-  <span><span class="sw" style="background:#dc2626"></span>no tile (403/404)</span>
-  <span><span class="sw" style="background:#6b7280"></span>not yet checked</span>
+  <span><span class="sw" style="background:#dc2626"></span>no tile</span>
+  <span><span class="sw" style="background:#6b7280"></span>not checked</span>
   <span id="orient" class="muted"></span>
 </div>
 
@@ -155,8 +173,8 @@
 <div class="scroll">
   <table id="results">
     <thead><tr>
-      <th>zoom</th><th>checked</th><th>exists</th><th>fill</th>
-      <th>declared box</th><th>observed box</th><th>verdict</th>
+      <th>zoom</th><th>requests</th><th>declared box</th><th>observed box</th>
+      <th>fill</th><th>verdict</th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -170,8 +188,8 @@
 <p class="note" style="margin-bottom:8px">
   Paste tiles the downloader called <span class="mono">missing</span> (one
   <span class="mono">z/x/y</span> or <span class="mono">z x y</span> per line). If
-  they load here, they were never really absent — which would mean the downloader
-  is recording live tiles as permanent holes.
+  they load here, they were never really absent — which would put the fault in the
+  downloader, not the bounds.
 </p>
 <textarea id="spot" spellcheck="false" placeholder="11/555/851&#10;12 1114 1706"></textarea>
 <div class="actions">
@@ -191,41 +209,27 @@
 
   const $ = (id) => document.getElementById(id);
   const canvas = $("map"), ctx = canvas.getContext("2d");
-  let stopped = false, running = false;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let stopped = false, requests = 0;
   const rows = [];
 
-  // -- helpers ------------------------------------------------------------
+  // -- rate limiting ------------------------------------------------------
+  // One shared gate for every probe, whichever mode issued it. JS is
+  // single-threaded, so reserving the next slot is atomic between the read and
+  // the write below -- no lock needed.
 
-  function parseBounds() {
-    try {
-      const raw = JSON.parse($("bounds").value);
-      const out = {};
-      for (const k of Object.keys(raw)) {
-        const b = raw[k];
-        const z = parseInt(k, 10);
-        if (!Number.isFinite(z)) continue;
-        out[z] = {
-          minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY,
-          get w() { return this.maxX - this.minX + 1; },
-          get h() { return this.maxY - this.minY + 1; },
-        };
-      }
-      return out;
-    } catch (e) {
-      return null;
-    }
+  let nextSlot = 0;
+  async function gate() {
+    const gap = 1000 / Math.max(1, +$("rps").value || 12);
+    const wait = Math.max(0, nextSlot - performance.now());
+    nextSlot = performance.now() + wait + gap;
+    if (wait > 0) await sleep(wait);
   }
 
-  function url(z, x, y) {
-    return $("tpl").value
-      .replaceAll("{code}", $("code").value.trim())
-      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
-  }
-
-  // Existence test. An <img> reports load/error without needing CORS; we cannot
-  // read the status code that way, but "did a picture arrive" is exactly the
-  // question, and it is the same question the map viewer itself asks.
-  function probe(u, timeoutMs) {
+  // An <img> reports load/error without needing CORS. It cannot expose the
+  // status code, but "did a picture arrive" is the question being asked, and it
+  // is the same question the map viewer itself asks.
+  function probeRaw(u, timeoutMs) {
     return new Promise((resolve) => {
       const img = new Image();
       let settled = false;
@@ -244,147 +248,302 @@
     });
   }
 
-  // Dispatch respecting both a parallel cap and a requests/second ceiling.
-  async function runQueue(tasks, onEach) {
-    const conc = Math.max(1, +$("conc").value || 6);
-    const rps = Math.max(1, +$("rps").value || 12);
-    const gap = 1000 / rps;
-    let next = 0, lastStart = 0;
-
-    async function worker() {
-      while (next < tasks.length && !stopped) {
-        const i = next++;
-        const wait = Math.max(0, lastStart + gap - performance.now());
-        lastStart = performance.now() + wait;
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-        if (stopped) return;
-        const t = tasks[i];
-        const res = await probe(t.url, 15000);
-        onEach(t, res);
-      }
-    }
-    await Promise.all(Array.from({ length: conc }, worker));
+  async function probe(z, x, y) {
+    if (stopped) return "stopped";
+    await gate();
+    if (stopped) return "stopped";
+    requests++;
+    return probeRaw(url(z, x, y), 15000);
   }
 
-  // -- scanning -----------------------------------------------------------
+  // -- config -------------------------------------------------------------
 
-  function tilesFor(z, b, budget) {
-    const total = b.w * b.h;
-    let stride = 1;
-    while (Math.ceil(b.w / stride) * Math.ceil(b.h / stride) > budget) stride++;
-    const list = [];
-    for (let y = b.minY; y <= b.maxY; y += stride) {
-      for (let x = b.minX; x <= b.maxX; x += stride) {
-        list.push({ z, x, y, url: url(z, x, y) });
+  function parseBounds() {
+    try {
+      const raw = JSON.parse($("bounds").value);
+      const out = {};
+      for (const k of Object.keys(raw)) {
+        const z = parseInt(k, 10);
+        if (!Number.isFinite(z)) continue;
+        const b = raw[k];
+        out[z] = { minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY };
       }
-    }
-    return { list, stride, total };
+      return out;
+    } catch (e) { return null; }
   }
+
+  const width = (b) => b.maxX - b.minX + 1;
+  const height = (b) => b.maxY - b.minY + 1;
+
+  function url(z, x, y) {
+    return $("tpl").value
+      .replaceAll("{code}", $("code").value.trim())
+      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  const mode = () => document.querySelector('input[name=mode]:checked').value;
+
+  // -- canvas -------------------------------------------------------------
+
+  let view = null;
 
   function setupCanvas(b, stride) {
-    const cols = Math.ceil(b.w / stride), rws = Math.ceil(b.h / stride);
+    const cols = Math.ceil(width(b) / stride), rws = Math.ceil(height(b) / stride);
     const cell = Math.max(1, Math.min(14, Math.floor(900 / Math.max(cols, 1))));
     canvas.width = cols * cell;
     canvas.height = rws * cell;
     ctx.fillStyle = "#6b7280";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     $("orient").textContent =
-      `${cols} × ${rws} cells` + (stride > 1 ? ` · sampled every ${stride} tiles` : "") +
+      `${cols} × ${rws} cells` + (stride > 1 ? ` · one per ${stride} tiles` : "") +
       " · north at top, west at left";
-    return { cell, stride, b };
+    view = { cell, stride, b };
   }
 
-  function paint(view, t, exists) {
-    const cx = Math.floor((t.x - view.b.minX) / view.stride) * view.cell;
-    const cy = Math.floor((t.y - view.b.minY) / view.stride) * view.cell;
+  function paint(x, y, exists) {
+    if (!view) return;
+    const cx = Math.floor((x - view.b.minX) / view.stride) * view.cell;
+    const cy = Math.floor((y - view.b.minY) / view.stride) * view.cell;
     ctx.fillStyle = exists ? "#22c55e" : "#dc2626";
     ctx.fillRect(cx, cy, view.cell, view.cell);
   }
 
-  async function scanZoom(z, bounds) {
-    const b = bounds[z];
-    if (!b) return null;
-    const budget = Math.max(100, +$("budget").value || 2500);
-    const { list, stride, total } = tilesFor(z, b, budget);
-    const view = setupCanvas(b, stride);
+  // -- edge finding -------------------------------------------------------
 
-    let checked = 0, exists = 0;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-
-    await runQueue(list, (t, res) => {
-      checked++;
-      const ok = res === "ok";
-      if (ok) {
-        exists++;
-        if (t.x < minX) minX = t.x;
-        if (t.x > maxX) maxX = t.x;
-        if (t.y < minY) minY = t.y;
-        if (t.y > maxY) maxY = t.y;
-      }
-      paint(view, t, ok);
-      if (checked % 10 === 0 || checked === list.length) {
-        $("status").textContent =
-          `z${z}: ${checked.toLocaleString()} / ${list.length.toLocaleString()} checked · ` +
-          `${exists.toLocaleString()} exist`;
-      }
-    });
-
-    if (!exists) {
-      return { z, checked, exists, stride, total, declared: b, observed: null };
+  // Evenly spread sample positions along a line, endpoints included.
+  function samplePoints(lo, hi, count) {
+    const span = hi - lo + 1;
+    if (span <= count) return Array.from({ length: span }, (_, i) => lo + i);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push(lo + Math.round(i * (span - 1) / (count - 1)));
     }
+    return [...new Set(out)];
+  }
+
+  async function testPoints(z, axis, index, pts) {
+    // Fired together: a line is a handful of requests, and awaiting them one at
+    // a time is what made the first version feel like a full download.
+    const results = await Promise.all(pts.map((p) => {
+      const x = axis === "x" ? index : p;
+      const y = axis === "x" ? p : index;
+      return probe(z, x, y).then((r) => {
+        if (r === "ok" || r === "missing") paint(x, y, r === "ok");
+        return r;
+      });
+    }));
+    return results.some((r) => r === "ok");
+  }
+
+  // Does this column (axis 'x') or row (axis 'y') hold any tile at all?
+  async function lineHasContent(z, b, axis, index, samples) {
+    const [lo, hi] = axis === "x" ? [b.minY, b.maxY] : [b.minX, b.maxX];
+    const coarse = samplePoints(lo, hi, samples);
+    if (await testPoints(z, axis, index, coarse)) return true;
+    if (stopped) return false;
+
+    // Nothing found -- but calling a line empty is what stops the walk and
+    // fixes the edge, so it is the one answer worth paying to be sure of.
+    // Evenly-spaced sampling steps straight over a thin feature (a road, a
+    // narrow strip of park), and near an edge is exactly where coverage is
+    // thinnest. Look again four times as finely before believing it.
+    const seen = new Set(coarse);
+    const fine = samplePoints(lo, hi, samples * 4).filter((p) => !seen.has(p));
+    if (!fine.length) return false;
+    return testPoints(z, axis, index, fine);
+  }
+
+  // Walk out from the declared edge (in case the box is too small), then in
+  // (in case it is too big), and stop at the first line holding content.
+  async function findEdge(z, b, axis, side, samples) {
+    const declared = axis === "x"
+      ? (side < 0 ? b.minX : b.maxX)
+      : (side < 0 ? b.minY : b.maxY);
+    const limit = axis === "x" ? width(b) : height(b);
+
+    // Outward first, in case the declared box is too small.
+    let out = declared;
+    for (let step = 1; step <= Math.min(64, limit) && !stopped; step++) {
+      const idx = declared + (side < 0 ? -step : step);
+      if (await lineHasContent(z, b, axis, idx, samples)) out = idx;
+      else break;
+    }
+    if (out !== declared) return { index: out, direction: "wider" };
+
+    // Then inward until something is found.
+    for (let step = 0; step <= limit && !stopped; step++) {
+      const idx = declared + (side < 0 ? step : -step);
+      if (await lineHasContent(z, b, axis, idx, samples)) {
+        return { index: idx, direction: step === 0 ? "exact" : "narrower" };
+      }
+    }
+    return { index: null, direction: "empty" };
+  }
+
+  // -- density ------------------------------------------------------------
+
+  async function measureDensity(z, b, n) {
+    const total = width(b) * height(b);
+    const want = Math.min(n, total);
+    const seen = new Set();
+    const picks = [];
+    while (picks.length < want) {
+      const x = b.minX + Math.floor(Math.random() * width(b));
+      const y = b.minY + Math.floor(Math.random() * height(b));
+      const key = x + "," + y;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      picks.push([x, y]);
+    }
+    let hits = 0, done = 0;
+    const conc = 8;
+    let next = 0;
+    async function worker() {
+      while (next < picks.length && !stopped) {
+        const [x, y] = picks[next++];
+        const r = await probe(z, x, y);
+        if (r === "stopped") return;
+        done++;
+        if (r === "ok") hits++;
+        paint(x, y, r === "ok");
+        if (done % 20 === 0) {
+          $("status").textContent =
+            `z${z}: density ${done}/${picks.length} · ${(hits / done * 100).toFixed(0)}% filled`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, worker));
+    if (!done) return null;
+    const p = hits / done;
+    // 95% confidence interval for a proportion.
+    const moe = 1.96 * Math.sqrt(Math.max(p * (1 - p), 1e-9) / done);
+    return { p, moe, n: done };
+  }
+
+  // -- full sweep ---------------------------------------------------------
+
+  function strideFor(b, budget) {
+    let s = 1;
+    while (Math.ceil(width(b) / s) * Math.ceil(height(b) / s) > budget) s++;
+    return s;
+  }
+
+  async function fullSweep(z, b, budget) {
+    const stride = strideFor(b, budget);
+    setupCanvas(b, stride);
+    const tiles = [];
+    for (let y = b.minY; y <= b.maxY; y += stride) {
+      for (let x = b.minX; x <= b.maxX; x += stride) tiles.push([x, y]);
+    }
+    let hits = 0, done = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let next = 0;
+    async function worker() {
+      while (next < tiles.length && !stopped) {
+        const [x, y] = tiles[next++];
+        const r = await probe(z, x, y);
+        if (r === "stopped") return;
+        done++;
+        if (r === "ok") {
+          hits++;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+        paint(x, y, r === "ok");
+        if (done % 20 === 0) {
+          $("status").textContent = `z${z}: ${done}/${tiles.length} · ${hits} exist`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: 8 }, worker));
     return {
-      z, checked, exists, stride, total, declared: b,
-      observed: { minX, maxX, minY, maxY },
+      stride, checked: done,
+      observed: hits ? { minX, maxX, minY, maxY } : null,
+      density: done ? { p: hits / done, moe: 0, n: done } : null,
     };
   }
 
-  function verdict(r) {
-    if (!r.observed) return ['<span class="bad">nothing found at all</span>', "no tiles responded"];
-    const d = r.declared, o = r.observed, s = r.stride;
-    const notes = [];
-    // Only trust an edge difference bigger than the sampling stride.
-    if (o.minX - d.minX > s) notes.push(`west edge is ${o.minX - d.minX} tiles in`);
-    if (d.maxX - o.maxX > s) notes.push(`east edge is ${d.maxX - o.maxX} tiles in`);
-    if (o.minY - d.minY > s) notes.push(`north edge is ${o.minY - d.minY} tiles in`);
-    if (d.maxY - o.maxY > s) notes.push(`south edge is ${d.maxY - o.maxY} tiles in`);
-    const fill = r.exists / r.checked;
-    if (!notes.length) {
-      return fill > 0.9
-        ? ['<span class="ok">box is correct and full</span>', "box correct, essentially full"]
-        : [`<span class="warn">box is correct, ${Math.round((1 - fill) * 100)}% empty inside</span>`,
-           `box correct, ${Math.round((1 - fill) * 100)}% empty inside`];
+  // -- per-zoom driver ----------------------------------------------------
+
+  async function runZoom(z, bounds) {
+    const b = bounds[z];
+    if (!b) return null;
+    const before = requests;
+
+    if (mode() === "full") {
+      const r = await fullSweep(z, b, Math.max(100, +$("budget").value || 2500));
+      return { z, declared: b, ...r, requests: requests - before, exhaustive: r.stride === 1 };
     }
-    return [`<span class="bad">box too big — ${notes.join(", ")}</span>`,
-            `box too big: ${notes.join(", ")}`];
+
+    setupCanvas(b, strideFor(b, 4000));
+    const samples = Math.max(3, +$("samples").value || 12);
+
+    const west  = await findEdge(z, b, "x", -1, samples);
+    const east  = await findEdge(z, b, "x", +1, samples);
+    const north = await findEdge(z, b, "y", -1, samples);
+    const south = await findEdge(z, b, "y", +1, samples);
+
+    const observed = (west.index === null || east.index === null ||
+                      north.index === null || south.index === null)
+      ? null
+      : { minX: west.index, maxX: east.index, minY: north.index, maxY: south.index };
+
+    const density = stopped ? null
+      : await measureDensity(z, b, Math.max(50, +$("density").value || 400));
+
+    return { z, declared: b, observed, density, requests: requests - before, stride: null };
+  }
+
+  function verdict(r) {
+    if (!r.observed) return ['<span class="bad">nothing responded</span>', "nothing responded"];
+    const d = r.declared, o = r.observed;
+    const diffs = [];
+    if (o.minX !== d.minX) diffs.push(`west ${d.minX}→${o.minX}`);
+    if (o.maxX !== d.maxX) diffs.push(`east ${d.maxX}→${o.maxX}`);
+    if (o.minY !== d.minY) diffs.push(`north ${d.minY}→${o.minY}`);
+    if (o.maxY !== d.maxY) diffs.push(`south ${d.maxY}→${o.maxY}`);
+
+    const fill = r.density ? r.density.p : null;
+    if (diffs.length) {
+      const t = `box wrong: ${diffs.join(", ")}`;
+      return [`<span class="bad">${t}</span>`, t];
+    }
+    if (fill === null) return ['<span class="ok">box confirmed</span>', "box confirmed"];
+    if (fill > 0.9) return ['<span class="ok">box confirmed, essentially full</span>', "box confirmed, full"];
+    const t = `box confirmed, ${Math.round((1 - fill) * 100)}% of it empty`;
+    return [`<span class="warn">${t}</span>`, t];
   }
 
   function addRow(r) {
     const [html, text] = verdict(r);
     const d = r.declared, o = r.observed;
+    const fill = r.density
+      ? `${(r.density.p * 100).toFixed(1)}%` +
+        (r.density.moe ? ` <span class="muted">±${(r.density.moe * 100).toFixed(1)}</span>` : "")
+      : "—";
     const tr = document.createElement("tr");
     tr.innerHTML =
       `<td>${r.z}</td>` +
-      `<td>${r.checked.toLocaleString()}${r.stride > 1 ? ` <span class="muted">of ${r.total.toLocaleString()}</span>` : ""}</td>` +
-      `<td>${r.exists.toLocaleString()}</td>` +
-      `<td>${(r.exists / r.checked * 100).toFixed(1)}%</td>` +
+      `<td>${r.requests.toLocaleString()}</td>` +
       `<td class="mono">${d.minX}-${d.maxX}, ${d.minY}-${d.maxY}</td>` +
       `<td class="mono">${o ? `${o.minX}-${o.maxX}, ${o.minY}-${o.maxY}` : "—"}</td>` +
+      `<td>${fill}</td>` +
       `<td>${html}</td>`;
     $("results").tBodies[0].appendChild(tr);
+
     rows.push(
-      `z${r.z}\tchecked ${r.checked}${r.stride > 1 ? `/${r.total} (stride ${r.stride})` : ""}` +
-      `\texists ${r.exists} (${(r.exists / r.checked * 100).toFixed(1)}%)` +
+      `z${r.z}\t${r.requests} requests` +
       `\tdeclared ${d.minX}-${d.maxX},${d.minY}-${d.maxY}` +
-      `\tobserved ${o ? `${o.minX}-${o.maxX},${o.minY}-${o.maxY}` : "none"}\t${text}`
+      `\tobserved ${o ? `${o.minX}-${o.maxX},${o.minY}-${o.maxY}` : "none"}` +
+      `\tfill ${r.density ? (r.density.p * 100).toFixed(1) + "%" +
+        (r.density.moe ? ` ±${(r.density.moe * 100).toFixed(1)}` : "") +
+        ` (n=${r.density.n})` : "n/a"}\t${text}`
     );
     $("copy").disabled = false;
   }
 
   function busy(on) {
-    running = on;
-    $("scan").disabled = on;
-    $("scanAll").disabled = on;
-    $("check").disabled = on;
+    for (const id of ["scan", "scanAll", "check"]) $(id).disabled = on;
     $("stop").disabled = !on;
   }
 
@@ -396,26 +555,24 @@
     try {
       for (const z of zooms) {
         if (stopped) break;
-        const r = await scanZoom(z, bounds);
+        const r = await runZoom(z, bounds);
         if (r) addRow(r);
       }
-      $("status").textContent = stopped ? "stopped" : "done";
-    } finally {
-      busy(false);
-    }
+      $("status").textContent = stopped ? "stopped" : `done · ${requests.toLocaleString()} requests total`;
+    } finally { busy(false); }
   }
 
   // -- wiring -------------------------------------------------------------
 
   function refreshZooms() {
     const bounds = parseBounds();
-    const sel = $("zoom");
-    const prev = sel.value;
+    const sel = $("zoom"), prev = sel.value;
     sel.innerHTML = "";
     if (!bounds) { $("plan").textContent = "boundsByZoom is not valid JSON"; return; }
     for (const z of Object.keys(bounds).map(Number).sort((a, b) => a - b)) {
       const o = document.createElement("option");
-      o.value = z; o.textContent = `z${z}  (${(bounds[z].w * bounds[z].h).toLocaleString()} tiles)`;
+      o.value = z;
+      o.textContent = `z${z}  (${(width(bounds[z]) * height(bounds[z])).toLocaleString()} tiles)`;
       sel.appendChild(o);
     }
     if (prev) sel.value = prev;
@@ -425,22 +582,33 @@
   function refreshPlan() {
     const bounds = parseBounds();
     if (!bounds) return;
-    const z = +$("zoom").value;
-    const b = bounds[z];
+    const b = bounds[+$("zoom").value];
     if (!b) return;
-    const budget = Math.max(100, +$("budget").value || 2500);
-    const { list, stride } = tilesFor(z, b, budget);
-    const secs = list.length / Math.max(1, +$("rps").value || 12);
+    const rps = Math.max(1, +$("rps").value || 12);
+    let n;
+    if (mode() === "full") {
+      const s = strideFor(b, Math.max(100, +$("budget").value || 2500));
+      n = Math.ceil(width(b) / s) * Math.ceil(height(b) / s);
+    } else {
+      // Four edges; a few lines each; a line that comes back empty is retested
+      // four times as finely, and on the way to an edge most lines are empty.
+      n = 4 * 3 * Math.max(3, +$("samples").value || 12) * 5 +
+          Math.max(50, +$("density").value || 400);
+    }
+    const secs = n / rps;
     $("plan").textContent =
-      `${list.length.toLocaleString()} requests` +
-      (stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} tile)` : " (every tile)") +
-      ` · about ${secs < 90 ? Math.ceil(secs) + "s" : Math.ceil(secs / 60) + " min"}`;
+      `about ${n.toLocaleString()} requests · ` +
+      (secs < 90 ? `${Math.ceil(secs)}s` : `${Math.ceil(secs / 60)} min`) +
+      (mode() === "edges" ? " (estimate — edges stop as soon as they find content)" : "");
   }
 
   $("bounds").addEventListener("input", refreshZooms);
-  $("zoom").addEventListener("change", refreshPlan);
-  $("budget").addEventListener("input", refreshPlan);
-  $("rps").addEventListener("input", refreshPlan);
+  for (const id of ["zoom", "budget", "rps", "samples", "density"]) {
+    $(id).addEventListener("input", refreshPlan);
+  }
+  for (const el of document.querySelectorAll('input[name=mode]')) {
+    el.addEventListener("change", refreshPlan);
+  }
 
   $("scan").addEventListener("click", () => go([+$("zoom").value]));
   $("scanAll").addEventListener("click", () => {
@@ -451,20 +619,16 @@
 
   $("copy").addEventListener("click", () => {
     const text = rows.join("\n");
-    navigator.clipboard.writeText(text).then(
-      () => { $("summary").hidden = false; $("summary").textContent = text; },
-      () => { $("summary").hidden = false; $("summary").textContent = text; }
-    );
+    $("summary").hidden = false;
+    $("summary").textContent = text;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   });
 
   $("check").addEventListener("click", async () => {
-    const lines = $("spot").value.split("\n").map((s) => s.trim()).filter(Boolean);
     const tasks = [];
-    for (const line of lines) {
-      const p = line.split(/[\/\s,]+/).map(Number);
-      if (p.length >= 3 && p.every(Number.isFinite)) {
-        tasks.push({ z: p[0], x: p[1], y: p[2], url: url(p[0], p[1], p[2]) });
-      }
+    for (const line of $("spot").value.split("\n")) {
+      const p = line.trim().split(/[\/\s,]+/).map(Number);
+      if (p.length >= 3 && p.slice(0, 3).every(Number.isFinite)) tasks.push(p.slice(0, 3));
     }
     if (!tasks.length) { $("spotStatus").textContent = "nothing parsed — one z/x/y per line"; return; }
 
@@ -474,21 +638,22 @@
     stopped = false;
     busy(true);
     let loaded = 0;
-    await runQueue(tasks, (t, res) => {
-      if (res === "ok") loaded++;
+    for (const [z, x, y] of tasks) {
+      if (stopped) break;
+      const r = await probe(z, x, y);
+      if (r === "ok") loaded++;
       const tr = document.createElement("tr");
-      const cls = res === "ok" ? "bad" : "ok";  // a tile that LOADS here is the bad news
-      const label = res === "ok" ? "loads fine" : res === "timeout" ? "timed out" : "no tile";
       tr.innerHTML =
-        `<td class="mono">${t.z}/${t.x}/${t.y}</td>` +
-        `<td class="${cls}">${label}</td>` +
-        `<td class="mono muted">${t.url}</td>`;
+        `<td class="mono">${z}/${x}/${y}</td>` +
+        `<td class="${r === "ok" ? "bad" : "ok"}">` +
+        `${r === "ok" ? "loads fine" : r === "timeout" ? "timed out" : "no tile"}</td>` +
+        `<td class="mono muted">${url(z, x, y)}</td>`;
       table.tBodies[0].appendChild(tr);
-    });
+    }
     busy(false);
     $("spotStatus").innerHTML = loaded
       ? `<span class="bad">${loaded} of ${tasks.length} loaded fine — those were not really missing.</span>`
-      : `<span class="ok">none of the ${tasks.length} loaded — they are genuinely absent.</span>`;
+      : `<span class="ok">none of the ${tasks.length} loaded — genuinely absent.</span>`;
   });
 
   refreshZooms();
