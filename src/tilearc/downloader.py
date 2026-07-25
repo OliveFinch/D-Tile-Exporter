@@ -311,25 +311,37 @@ class Downloader:
 
     # -- interrupt handling ------------------------------------------------
 
+    def request_stop(self, message: str | None = None) -> None:
+        """Ask the job to wind down: finish in-flight tiles, then save state.
+
+        Safe to call from a signal handler or, via
+        ``loop.call_soon_threadsafe``, from another thread -- which is how the
+        GUI's Stop button reaches it.
+        """
+        if self._stop.is_set():
+            return
+        self.result.interrupted = True
+        self._stop.set()
+        if message:
+            self.log(message)
+
     def _install_signal_handler(self) -> None:
         self._previous: Any = None
         try:
             loop = asyncio.get_running_loop()
             loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
             self._handler_installed = True
-        except (NotImplementedError, RuntimeError):  # pragma: no cover - non-POSIX
+        except Exception:
+            # Only the main thread can own signal handlers; a GUI worker
+            # thread cannot, and does not need to.
             self._handler_installed = False
 
     def _remove_signal_handler(self) -> None:
         if getattr(self, "_handler_installed", False):
             try:
                 asyncio.get_running_loop().remove_signal_handler(signal.SIGINT)
-            except (NotImplementedError, RuntimeError):  # pragma: no cover
+            except Exception:  # pragma: no cover
                 pass
 
     def _on_interrupt(self) -> None:
-        if self._stop.is_set():
-            return
-        self.result.interrupted = True
-        self._stop.set()
-        self.log("\ninterrupted -- finishing in-flight tiles and saving state...")
+        self.request_stop("\ninterrupted -- finishing in-flight tiles and saving state...")

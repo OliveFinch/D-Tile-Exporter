@@ -116,7 +116,7 @@ def test_end_to_end_dir(mock_http, tmp_path):
         "--park", "hkdl", "--version", "19", "--max-zoom", "14",
         "--format", "dir", "-o", str(output),
     )
-    root = output / "hkdl_19"
+    root = output
     assert (root / "14" / "13380" / "7148.jpg").read_bytes() == JPEG
     assert (root / "manifest.json").is_file()
     assert main(["verify", str(root)]) == 0
@@ -278,7 +278,7 @@ def test_aborted_job_keeps_staging_and_resumes_to_a_complete_archive(mock_http, 
     assert code != 0
 
     assert not output.exists(), "an unfinished job must not leave a packed zip"
-    staging = tmp_path / "a.zip.parts" / "hkdl_19"
+    staging = tmp_path / "a.zip.parts"
     assert staging.is_dir()
     assert len(list(staging.rglob("*.jpg"))) == 10
 
@@ -312,7 +312,7 @@ def test_aborted_job_manifest_is_marked_incomplete(mock_http, tmp_path):
         "--yes", "--rps", "0", "--no-progress",
     ])
 
-    manifest = json.loads((output / "hkdl_19" / "manifest.json").read_text())
+    manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["complete"] is False
     assert manifest["tiles"]["fetched"] == 5
 
@@ -386,7 +386,7 @@ def test_tdr_both_modes_write_separate_trees(mock_http, tmp_path):
         "--min-zoom", "16", "--max-zoom", "16", "--mode", "both",
         "--format", "dir", "-o", str(output),
     )
-    root = output / "tdr_20260122183830"
+    root = output
     assert (root / "daytime" / "16" / "58230" / "25810.jpg").is_file()
     assert (root / "nighttime" / "16" / "58230" / "25810.jpg").is_file()
     assert len(mock_http["requests"]) == 882

@@ -14,17 +14,17 @@ from . import USER_AGENT, __version__
 from .bounds import BBox
 from .config import ParkRepository, build_repository
 from .doctor import check_park, worst_severity
-from .downloader import CONCURRENCY_WARN_THRESHOLD, Downloader, DownloadOptions
+from .downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
 from .errors import ConfigError, QuotaError, TilearcError
-from .manifest import build_manifest, utcnow
+from .job import JobRequest, run_job
 from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan
 from .progress import Progress
-from .state import JobState, default_state_path
+from .state import default_state_path
 from .tdr import build_tdr_source, check_worker_quota, load_credentials, normalise_modes
 from .urls import build_source
 from .util import human_bytes, sanitize_component
 from .verify import verify as verify_archive
-from .writers import FORMATS, build_writer, default_output
+from .writers import FORMATS, default_output
 
 DEFAULT_MAX_TILES = 250_000
 
@@ -402,107 +402,76 @@ def cmd_download(args: argparse.Namespace) -> int:
         return 1
 
     # -- run ---------------------------------------------------------------
-    started_at = utcnow()
     options = DownloadOptions(
         concurrency=args.concurrency,
         rps=args.rps,
         retries=args.retries,
         timeout=args.timeout,
     )
+    progress = Progress(plan.total_tiles, enabled=not args.no_progress)
 
-    writer = build_writer(fmt, output, plan)
-    state = JobState(state_path)
-    descriptor = {
-        "park": park.park_id,
-        "version": plan.version.code,
-        "zooms": [zp.zoom for zp in plan.zooms],
-        "modes": plan.modes,
-    }
-    resumed = state.bind_job(plan.fingerprint(), descriptor, allow_restart=args.restart)
-    if resumed:
-        counts = state.counts()
+    def announce_resume(counts: dict[str, int]) -> None:
         info(
             f"resuming: {counts.get('done', 0):,} already downloaded, "
             f"{counts.get('missing', 0):,} known missing, "
             f"{counts.get('failed', 0):,} to retry"
         )
 
-    progress = Progress(plan.total_tiles, enabled=not args.no_progress)
-    writer.open()
-    downloader = Downloader(
-        plan, tile_sources, writer, state, options, progress,
-        log=(lambda m: None) if args.no_progress else _progress_safe_log(progress),
+    request = JobRequest(
+        plan=plan,
+        sources=tile_sources,
+        fmt=fmt,
+        output=output,
+        state_path=state_path,
+        options=options,
+        restart=args.restart,
     )
 
-    error: BaseException | None = None
     try:
-        result = asyncio.run(downloader.run())
-    except (KeyboardInterrupt, TilearcError) as exc:
-        result = downloader.result
-        result.interrupted = True
-        error = exc
+        outcome = asyncio.run(
+            run_job(
+                request,
+                progress,
+                log=(lambda m: None) if args.no_progress else _progress_safe_log(progress),
+                on_resume=announce_resume,
+            )
+        )
+    except KeyboardInterrupt:
+        progress.close()
+        raise
     finally:
         progress.close()
-
-    # Ctrl-C sets `interrupted` without raising, so both paths must be checked.
-    stopped_early = result.interrupted or error is not None
-    complete = not stopped_early and result.failed == 0
-
-    counts = state.counts()
-
-    # A manifest is written even for a partial run: an archive that documents
-    # what it contains is far more useful than a silent one.
-    manifest = build_manifest(
-        plan,
-        started_at=started_at,
-        fetched=counts.get("done", 0),
-        missing=counts.get("missing", 0),
-        failed=counts.get("failed", 0),
-        total_bytes=state.total_bytes(),
-        tile_urls=sources,
-        complete=complete,
-        extra={"stateDatabase": str(state_path)},
-    )
-
-    nothing_done = not counts.get("done") and not counts.get("missing")
-    if error is not None and nothing_done:
-        writer.abort()
-        state.close()
-        raise error if isinstance(error, TilearcError) else TilearcError(str(error))
-
-    artefact = writer.finalize(manifest, complete=complete)
-    state.close()
 
     info("")
     info(progress.summary())
 
-    if stopped_early:
+    if outcome.stopped_early:
         if fmt == "zip":
-            info(f"staged   {artefact} (not packed -- the job is unfinished)")
+            info(f"staged   {outcome.artefact} (not packed -- the job is unfinished)")
         else:
-            info(f"wrote    {artefact}")
-        info(f"state    {state_path}")
+            info(f"wrote    {outcome.artefact}")
+        info(f"state    {outcome.state_path}")
         info("")
-        if error is not None:
-            warn(f"job did not complete: {error}")
+        if outcome.error is not None:
+            warn(f"job did not complete: {outcome.error}")
         else:
             warn("job was interrupted")
         info("re-run the same command to continue where it stopped")
-        if error is not None:
-            return getattr(error, "exit_code", 1)
+        if outcome.error is not None:
+            return getattr(outcome.error, "exit_code", 1)
         return 130
 
-    info(f"wrote    {artefact}")
+    info(f"wrote    {outcome.artefact}")
 
-    if counts.get("failed"):
+    if outcome.failed:
         warn(
-            f"{counts['failed']:,} tile(s) failed after retries; re-run the same "
+            f"{outcome.failed:,} tile(s) failed after retries; re-run the same "
             f"command to retry just those"
         )
         return 1
 
-    info(f"archive complete ({counts.get('done', 0):,} tiles, "
-         f"{counts.get('missing', 0):,} with no coverage)")
+    info(f"archive complete ({outcome.downloaded:,} tiles, "
+         f"{outcome.missing:,} with no coverage)")
     return 0
 
 

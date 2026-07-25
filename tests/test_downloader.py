@@ -30,7 +30,7 @@ def make_plan(repo, park="hkdl", version="19", **kwargs):
 
 def run_job(plan, handler, tmp_path, *, options=None, source=None, state=None):
     """Wire a Downloader up to a MockTransport and run it to completion."""
-    writer = DirWriter(Path(tmp_path) / "out", plan)
+    writer = DirWriter(Path(tmp_path) / "out" / plan.slug, plan)
     writer.open()
     state = state or JobState(Path(tmp_path) / "s.sqlite")
     state.bind_job(plan.fingerprint(), {})

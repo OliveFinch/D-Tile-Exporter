@@ -12,10 +12,14 @@ license = { text = "MIT" }
 dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+gui = ["PySide6>=6.6"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "PySide6>=6.6"]
 
 [project.scripts]
 tilearc = "tilearc.cli:main"
+
+[project.gui-scripts]
+tilearc-gui = "tilearc_gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
