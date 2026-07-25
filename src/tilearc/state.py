@@ -185,6 +185,24 @@ class JobState:
         rows = self.conn.execute("SELECT status, COUNT(*) FROM tiles GROUP BY status")
         return {status: count for status, count in rows}
 
+    def clear_missing(self) -> int:
+        """Forget every "no imagery here" verdict, keeping downloaded tiles.
+
+        ``missing`` is normally permanent, and should be: a tile the server has
+        said does not exist will not start existing, and re-asking on every run
+        would waste tens of thousands of requests.
+
+        That is only sound while the verdict is trustworthy. A server that
+        answers 403 because it is refusing us -- rate limiting, bot blocking --
+        is indistinguishable from one saying "no tile here", and those refusals
+        get recorded just as permanently. This clears them so a resume re-asks,
+        without discarding tiles already fetched (which ``--restart`` would).
+        """
+        self.flush()
+        cur = self.conn.execute("DELETE FROM tiles WHERE status = ?", (STATUS_MISSING,))
+        self.conn.commit()
+        return cur.rowcount
+
     def total_bytes(self) -> int:
         self.flush()
         row = self.conn.execute(

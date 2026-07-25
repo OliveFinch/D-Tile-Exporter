@@ -211,6 +211,15 @@ class DownloadTab(QWidget):
         polite_row.addStretch(1)
         dest_layout.addLayout(polite_row)
 
+        self.retry_missing = QCheckBox("Re-check tiles previously found to have no imagery")
+        self.retry_missing.setToolTip(
+            "'No imagery' is normally permanent. Tick this if a previous run was "
+            "rate-limited: a server refusing requests looks identical to one "
+            "reporting empty space, and those refusals were recorded as final. "
+            "Tiles already downloaded are kept."
+        )
+        dest_layout.addWidget(self.retry_missing)
+
         self.adaptive = QCheckBox("Slow down automatically if the server pushes back")
         self.adaptive.setChecked(True)
         self.adaptive.setToolTip(
@@ -570,6 +579,7 @@ class DownloadTab(QWidget):
         for widget in (
             self.park_combo, self.version_combo, self.inactive_check,
             self.min_zoom, self.max_zoom, self.format_combo, self.adaptive,
+            self.retry_missing,
             self.tdr_mode, self.tdr_route, self.tdr_credentials, self.tdr_browse,
             self.browse_button, self.concurrency, self.rps,
         ):
@@ -617,6 +627,7 @@ class DownloadTab(QWidget):
                 rps=float(self.rps.value()),
                 adaptive=self.adaptive.isChecked(),
             ),
+            retry_missing=self.retry_missing.isChecked(),
         )
 
         self.log.clear()

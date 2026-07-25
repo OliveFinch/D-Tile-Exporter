@@ -131,6 +131,14 @@ servers lay them out. *Zip archive* packs that same structure into one file.
 *MBTiles database* produces a single file for map tools — note it stores rows
 in TMS order, as that format requires.
 
+**If a run gets rate-limited.** "No imagery" is normally permanent — the tile
+is not coming back, and re-asking every run would waste tens of thousands of
+requests. But a server *refusing* requests also answers 403, and that looks
+identical. The app now re-requests one of the tiles after a long run of them:
+if it arrives, the run was a refusal, the job stops and says so. To recover,
+tick **Re-check tiles previously found to have no imagery** and download again
+— tiles already saved are kept.
+
 ### Stopping and resuming
 
 **Stop** is safe at any point. It lets in-flight tiles finish, saves state, and

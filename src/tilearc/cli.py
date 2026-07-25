@@ -556,6 +556,7 @@ def cmd_download(args: argparse.Namespace) -> int:
         state_path=state_path,
         options=options,
         restart=args.restart,
+        retry_missing=args.retry_missing,
     )
 
     try:
@@ -709,6 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--state-db", help="path to the job state DB")
     resume.add_argument(
         "--restart", action="store_true", help="discard existing job state and start over"
+    )
+    resume.add_argument(
+        "--retry-missing", action="store_true",
+        help="re-ask for tiles previously recorded as having no imagery, keeping "
+             "downloaded ones (use when a run was rate-limited)",
     )
     resume.add_argument("--no-progress", action="store_true")
 

@@ -102,6 +102,13 @@ and the tool version.
   bounds are rectangular but coverage is not, so gaps are expected. Missing
   tiles are recorded once and never requested again, on this run or any future
   one.
+* That last rule only holds while "missing" is trustworthy. A server refusing
+  requests answers 403 too, and looks identical to one reporting empty space.
+  After a long run of missing responses *following* successful ones, one of
+  those tiles is re-requested: if it arrives, the run was a refusal, the job
+  stops, and `--retry-missing` clears the false verdicts while keeping
+  downloaded tiles. If it is still absent, the map really is empty there and
+  the job carries on.
 * `download` prints the full plan and asks for confirmation before fetching
   anything (`--yes` to skip, `--dry-run` to stop before it).
 

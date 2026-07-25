@@ -91,3 +91,27 @@ def test_failures_are_listable(tmp_path):
         state.bind_job("abc", {})
         state.record(11, 5, 5, "", STATUS_FAILED, attempts=6)
         assert state.failures() == [(11, 5, 5, "", 6)]
+
+
+def test_clear_missing_keeps_downloads_and_failures(tmp_path):
+    """Recovery from a rate-limited run: re-ask for the holes, keep the tiles."""
+    path = tmp_path / "s.sqlite"
+    with JobState(path) as state:
+        state.bind_job("abc", {"park": "wdw"})
+        state.record(11, 555, 851, "", STATUS_DONE, size=900)
+        state.record(11, 556, 851, "", STATUS_MISSING)
+        state.record(11, 557, 851, "", STATUS_MISSING)
+        state.record(11, 558, 851, "", STATUS_FAILED)
+
+        assert state.clear_missing() == 2
+        assert state.counts() == {STATUS_DONE: 1, STATUS_FAILED: 1}
+        # Cleared tiles are pending again, so a resume asks for them.
+        assert state.completed() == {_pack(11, 555, 851)}
+
+
+def test_clear_missing_on_a_clean_job_is_a_no_op(tmp_path):
+    with JobState(tmp_path / "s.sqlite") as state:
+        state.bind_job("abc", {"park": "wdw"})
+        state.record(11, 555, 851, "", STATUS_DONE, size=900)
+        assert state.clear_missing() == 0
+        assert state.counts() == {STATUS_DONE: 1}

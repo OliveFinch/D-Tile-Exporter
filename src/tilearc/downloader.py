@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import random
 import signal
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
@@ -55,6 +56,10 @@ class DownloadOptions:
     error_streak_limit: int = 50
     #: Abort if the first N responses are all "missing" (see _check_all_missing).
     all_missing_probe: int = 200
+    #: After this many consecutive "missing" responses *following* successful
+    #: ones, re-request one of them to check the verdict is real. 0 disables.
+    #: See :meth:`Downloader._verify_missing_run`.
+    missing_run_probe: int = 400
 
 
 @dataclass
@@ -108,6 +113,14 @@ class Downloader:
         self._seen = 0
         self._missing_run = 0
         self._had_success = False
+        #: A few of the most recent tiles called missing, kept so one can be
+        #: re-requested to check the verdict. Coordinates only; nothing large.
+        self._recent_missing: deque[tuple[int, int, int, str]] = deque(maxlen=64)
+        #: The `_missing_run` length at which to next verify. Raised after each
+        #: check that comes back clean, so a genuinely sparse park is not
+        #: re-probed every few hundred tiles for the whole run.
+        self._next_missing_check = 0
+        self._verifying = False
 
     # -- helpers -----------------------------------------------------------
 
@@ -152,6 +165,69 @@ class Downloader:
             error = TilearcError(hint)
         self._abort(error)
 
+    async def _verify_missing_run(self, client: httpx.AsyncClient, limiter) -> None:
+        """Check that a long run of "missing" really is missing.
+
+        ``_check_all_missing`` only fires before the first success, which makes
+        it blind to the more damaging case: a job that starts fine and is then
+        refused part-way through. A CDN that answers 403 because it is rate
+        limiting or blocking us looks exactly like one saying "no tile here",
+        and *missing is terminal* -- recorded once, never retried, on this run
+        or any future one. Left unchecked, a job carries on to the end and
+        writes an archive full of holes while reporting zero failures.
+
+        Guessing from the run length alone would be wrong: park bounds are
+        rectangles and coverage is not, so a genuinely sparse map produces long
+        legitimate runs. So do not guess -- re-request one of the tiles just
+        called missing. If it comes back, the verdicts in this run are false
+        and the run stops. If it is still missing, the map really is empty
+        here; raise the bar and carry on.
+        """
+        probe = self.options.missing_run_probe
+        if probe <= 0 or not self._had_success or self._verifying:
+            return
+        if self._missing_run < max(probe, self._next_missing_check):
+            return
+        if not self._recent_missing:
+            return
+
+        self._verifying = True
+        try:
+            z, x, y, mode = random.choice(list(self._recent_missing))
+            source = self._source(mode)
+            headers = self._headers.setdefault(mode, source.request_headers())
+            await limiter.acquire()
+            try:
+                response = await client.get(source.url(z, x, y), headers=headers)
+            except (httpx.TimeoutException, httpx.TransportError):
+                return  # Inconclusive -- leave the threshold alone and retry later.
+            outcome = source.classify(response.status_code, len(response.content))
+
+            if outcome != Outcome.OK:
+                # The verdict holds. Check again after twice as long a run, so a
+                # sparse park is not re-probed every few hundred tiles all job.
+                self._next_missing_check = self._missing_run + probe * 2
+                self.log(
+                    f"checked {z}/{x}/{y} after {self._missing_run:,} missing in a row "
+                    f"— still absent, continuing"
+                )
+                return
+
+            self._abort(
+                TilearcError(
+                    f"{self._missing_run:,} tiles in a row were recorded as having no "
+                    f"imagery, but {z}/{x}/{y} downloaded fine when asked again just "
+                    f"now. The server is refusing requests rather than reporting empty "
+                    f"space — most likely rate limiting.\n"
+                    f"  Those tiles are NOT missing, and 'missing' is normally "
+                    f"permanent, so the job state now holds wrong answers.\n"
+                    f"  Re-run with --retry-missing to re-ask for them (downloaded "
+                    f"tiles are kept), and lower --rps."
+                )
+            )
+        finally:
+            self._verifying = False
+
     # -- one tile ----------------------------------------------------------
 
     async def _fetch_tile(
@@ -180,6 +256,7 @@ class Downloader:
                 self._had_success = True
                 self._error_streak = 0
                 self._missing_run = 0
+                self._next_missing_check = 0
                 self._seen += 1
                 digest = hashlib.sha256(body).hexdigest()
                 self.writer.write_tile(z, x, y, mode, body)
@@ -199,10 +276,12 @@ class Downloader:
                 self._error_streak = 0
                 self._seen += 1
                 self._missing_run += 1
+                self._recent_missing.append((z, x, y, mode))
                 self.state.record(z, x, y, mode, STATUS_MISSING, attempts=attempts)
                 self.result.missing += 1
                 self.progress.update(missing=1)
                 self._check_all_missing()
+                await self._verify_missing_run(client, limiter)
                 return
 
             if outcome == Outcome.AUTH:
