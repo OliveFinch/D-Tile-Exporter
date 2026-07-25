@@ -160,11 +160,27 @@ It never edits a config. A rectangle silently widened would add thousands of
 404s to every future job; one silently narrowed would drop part of the map
 without telling you.
 
-Note that `span` and `coverage` assume a pyramid covers the same ground at every
-zoom, and WDW does not — it crops as you zoom in, from about 172 km across at
-z11 to 13 km at z19. Most of what they report for WDW is that legitimate
-cropping. The one that isn't is **z12**, whose west edge sits ~17 km east of
-every other level, so z13 covers ground z12 doesn't.
+**These checks guess.** `span` and `coverage` assume a pyramid covers the same
+ground at every zoom, and WDW does not — it crops as you zoom in, from about
+172 km across at z11 to 13 km at z19. Most of what they report for WDW is that
+legitimate cropping, which is why the next button exists.
+
+### Measure from server…
+
+Stops guessing and asks. For each zoom it checks the four declared edges
+against the real tile server and walks outward or inward until it finds where
+the map actually stops.
+
+It tells you the cost and asks first, changes nothing, and hands back a
+`boundsByZoom` block to paste into
+`parks/{id}/{id}_config.json`. Measuring all of WDW is about 1,100 requests;
+probes ask for one byte per tile, not the whole image.
+
+Once that block is committed to the viewer repo, **both apps pick it up** — the
+archiver stops requesting tiles that were never there, and the viewer stops
+hiding parts of the map that were.
+
+Tokyo Disney Resort can't be measured here: it needs credentials and a proxy.
 
 ---
 
