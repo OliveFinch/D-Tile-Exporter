@@ -25,7 +25,7 @@ import httpx
 from .errors import CredentialsExpiredError, TilearcError
 from .plan import JobPlan
 from .progress import Progress
-from .ratelimit import NullRateLimiter, RateLimiter
+from .ratelimit import AdaptiveRateLimiter, build_limiter
 from .state import STATUS_DONE, STATUS_FAILED, STATUS_MISSING, JobState, _pack
 from .urls import Outcome, TileSource
 from .writers.base import TileWriter
@@ -34,11 +34,19 @@ from .writers.base import TileWriter
 #: connections against someone else's production CDN.
 CONCURRENCY_WARN_THRESHOLD = 10
 
+#: Statuses that mean "you are going too fast" rather than "this tile is broken".
+#: 429 is explicit; 503 is what CDNs return when shedding load, and treating it
+#: as push-back too is the difference between easing off and being blocked.
+PUSHBACK_STATUSES = frozenset({429, 503})
+
 
 @dataclass
 class DownloadOptions:
     concurrency: int = 5
     rps: float = 10.0
+    #: Treat ``rps`` as a ceiling and back off automatically on 429/503 rather
+    #: than holding the rate come what may. See :mod:`tilearc.ratelimit`.
+    adaptive: bool = True
     retries: int = 5
     timeout: float = 30.0
     backoff_base: float = 1.0
@@ -209,6 +217,15 @@ class Downloader:
                 return
 
             # -- retryable ----------------------------------------------
+            # Tell the limiter before deciding what to do with this tile: the
+            # server pushed back on the *job*, and that stays true whether or
+            # not we have retries left for this particular tile.
+            if status in PUSHBACK_STATUSES and await limiter.penalise():
+                self.log(
+                    f"HTTP {status} from the server — easing off to "
+                    f"{limiter.rate:.1f} req/s"
+                )
+
             if attempts > self.options.retries:
                 self._error_streak += 1
                 self.state.record(z, x, y, mode, STATUS_FAILED, attempts=attempts)
@@ -250,7 +267,7 @@ class Downloader:
 
     async def run(self) -> DownloadResult:
         options = self.options
-        limiter = RateLimiter(options.rps) if options.rps > 0 else NullRateLimiter()
+        limiter = build_limiter(options.rps, adaptive=options.adaptive)
         queue: asyncio.Queue[tuple[int, int, int, str] | None] = asyncio.Queue(
             maxsize=options.concurrency * 4
         )
@@ -304,6 +321,13 @@ class Downloader:
             await client.aclose()
             self.state.flush()
             self.progress.render(force=True)
+
+        if isinstance(limiter, AdaptiveRateLimiter) and limiter.penalties:
+            self.result.warnings.append(
+                f"the server pushed back {limiter.penalties} time(s); the rate was "
+                f"reduced from {limiter.ceiling:g} to {limiter.rate:.1f} req/s. "
+                f"Consider starting nearer {limiter.rate:.0f} req/s next time."
+            )
 
         if self._abort_reason is not None:
             raise self._abort_reason

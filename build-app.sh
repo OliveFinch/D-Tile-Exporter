@@ -31,24 +31,56 @@ fi
 
 echo "==> Using $("$PYTHON" --version)"
 
+# Where the venv keeps its interpreter (POSIX vs Windows layouts).
+if [ -x "$VENV/Scripts/python.exe" ]; then
+    VPYTHON="$VENV/Scripts/python.exe"
+else
+    VPYTHON="$VENV/bin/python"
+fi
+
+# An existing .venv is not necessarily a working one. Unzipping a fresh copy of
+# the project over an old folder leaves the previous .venv behind (it is not in
+# the archive), and its interpreter is a symlink to whichever Python built it --
+# dead as soon as that Python is upgraded or removed. Activating such a venv
+# succeeds, because activation only edits PATH, and the failure surfaces later
+# as a baffling "python: command not found". So test it rather than trust it.
+if [ -d "$VENV" ] && ! "$VPYTHON" -c 'import sys' 2>/dev/null; then
+    echo "==> Existing $VENV is broken (its interpreter no longer runs) — rebuilding"
+    rm -rf "$VENV"
+fi
+
 if [ ! -d "$VENV" ]; then
     echo "==> Creating virtual environment in $VENV"
     "$PYTHON" -m venv "$VENV"
 fi
 
-# shellcheck disable=SC1091
-source "$VENV/bin/activate" 2>/dev/null || source "$VENV/Scripts/activate"
+if [ ! -x "$VPYTHON" ]; then
+    echo "Error: $VENV exists but has no usable interpreter at $VPYTHON."
+    echo "       Delete it and re-run:  rm -rf $VENV && $0"
+    exit 1
+fi
+
+# Warn when reusing a venv built by a different Python than the one requested;
+# the build would otherwise quietly use the old one.
+WANT=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+HAVE=$("$VPYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+if [ "$WANT" != "$HAVE" ]; then
+    echo "==> Note: $VENV was built with Python $HAVE, but $PYTHON is $WANT."
+    echo "    Using $HAVE. Run 'rm -rf $VENV' first if you meant to switch."
+fi
 
 echo "==> Installing dependencies (this takes a minute the first time)"
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -e ".[gui]"
-python -m pip install --quiet pyinstaller
+# Called by absolute path rather than relying on PATH after 'activate' -- one
+# less thing that can silently resolve to the wrong interpreter.
+"$VPYTHON" -m pip install --quiet --upgrade pip
+"$VPYTHON" -m pip install --quiet -e ".[gui]"
+"$VPYTHON" -m pip install --quiet pyinstaller
 
 # ---------------------------------------------------------------- build
 
 echo "==> Building"
 rm -rf build dist
-pyinstaller --clean --noconfirm packaging/ParkTileArchiver.spec
+"$VPYTHON" -m PyInstaller --clean --noconfirm packaging/ParkTileArchiver.spec
 
 # ---------------------------------------------------------------- verify
 #

@@ -100,9 +100,11 @@ class AppContext(QObject):
     def downloadable_park_ids(self) -> list[tuple[str, str]]:
         """``(id, label)`` for parks this app can actually fetch.
 
-        Parks with no tile template need credentials and a proxy -- only Tokyo
-        Disney Resort, which this front-end does not handle. Filtering on the
-        missing template rather than on the name keeps the rule honest.
+        A park is fetchable either because it has a public tile template, or
+        because it is credential-gated and the Download tab knows how to ask
+        for those credentials -- which, since TDR support was added there, it
+        does. Testing the config rather than the park name keeps the rule
+        honest if another park ever goes the same way.
         """
         repository = self.repository()
         usable: list[tuple[str, str]] = []
@@ -111,7 +113,11 @@ class AppContext(QObject):
                 config = repository.park(park_id)
             except Exception:
                 continue
-            if config.tile_template or any(v.url for v in repository.versions(park_id)):
+            if (
+                config.tile_template
+                or config.requires_credentials
+                or any(v.url for v in repository.versions(park_id))
+            ):
                 usable.append((park_id, config.label))
         return usable
 

@@ -242,6 +242,55 @@ def test_exhausted_retries_mark_the_tile_failed_not_missing(repo, tmp_path):
     assert counts["failed"] == 4
 
 
+def test_pushback_lowers_the_rate_and_says_so(repo, tmp_path):
+    """429 must slow the whole job down, not just the tile that hit it."""
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "0"})
+
+    options = DownloadOptions(
+        concurrency=2, rps=50, adaptive=True, retries=1, backoff_base=0.001
+    )
+    _dl, result, _w, _s = run_job(make_plan(repo), handler, tmp_path, options=options)
+
+    assert result.failed == 12
+    assert any("pushed back" in w for w in result.warnings)
+
+
+def test_503_counts_as_pushback_too(repo, tmp_path):
+    """A CDN shedding load is telling us the same thing a 429 does."""
+    def handler(request):
+        return httpx.Response(503)
+
+    options = DownloadOptions(
+        concurrency=2, rps=50, adaptive=True, retries=1, backoff_base=0.001
+    )
+    _dl, result, _w, _s = run_job(make_plan(repo), handler, tmp_path, options=options)
+
+    assert any("pushed back" in w for w in result.warnings)
+
+
+def test_adaptive_can_be_turned_off(repo, tmp_path):
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "0"})
+
+    options = DownloadOptions(
+        concurrency=2, rps=50, adaptive=False, retries=1, backoff_base=0.001
+    )
+    _dl, result, _w, _s = run_job(make_plan(repo), handler, tmp_path, options=options)
+
+    assert result.failed == 12
+    assert not any("pushed back" in w for w in result.warnings)
+
+
+def test_a_clean_job_reports_no_throttling(repo, tmp_path):
+    options = DownloadOptions(concurrency=2, rps=50, adaptive=True, retries=1)
+    _dl, result, _w, _s = run_job(
+        make_plan(repo), lambda r: httpx.Response(200, content=JPEG), tmp_path, options=options
+    )
+    assert result.fetched == 12
+    assert not any("pushed back" in w for w in result.warnings)
+
+
 # ---------------------------------------------------------------------------
 # circuit breakers
 # ---------------------------------------------------------------------------
