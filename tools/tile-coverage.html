@@ -98,7 +98,8 @@
 <fieldset>
   <legend>What to run</legend>
   <div class="modes">
-    <label><input type="radio" name="mode" value="edges" checked> <span><b>Edges + density</b> — a few hundred requests</span></label>
+    <label><input type="radio" name="mode" value="edgesonly" checked> <span><b>Edges only</b> — fastest, nothing inside the box</span></label>
+    <label><input type="radio" name="mode" value="edges"> <span><b>Edges + density</b> — adds a sample of the interior</span></label>
     <label><input type="radio" name="mode" value="full"> <span><b>Full coverage map</b> — slow, shows the shape</span></label>
   </div>
   <div class="row" style="margin-top:12px">
@@ -488,7 +489,7 @@
       ? null
       : { minX: west.index, maxX: east.index, minY: north.index, maxY: south.index };
 
-    const density = stopped ? null
+    const density = (stopped || mode() === "edgesonly") ? null
       : await measureDensity(z, b, Math.max(50, +$("density").value || 400));
 
     return { z, declared: b, observed, density, requests: requests - before, stride: null };
@@ -592,14 +593,14 @@
     } else {
       // Four edges; a few lines each; a line that comes back empty is retested
       // four times as finely, and on the way to an edge most lines are empty.
-      n = 4 * 3 * Math.max(3, +$("samples").value || 12) * 5 +
-          Math.max(50, +$("density").value || 400);
+      n = 4 * 3 * Math.max(3, +$("samples").value || 12) * 5;
+      if (mode() === "edges") n += Math.max(50, +$("density").value || 400);
     }
     const secs = n / rps;
     $("plan").textContent =
       `about ${n.toLocaleString()} requests · ` +
       (secs < 90 ? `${Math.ceil(secs)}s` : `${Math.ceil(secs / 60)} min`) +
-      (mode() === "edges" ? " (estimate — edges stop as soon as they find content)" : "");
+      (mode() !== "full" ? " (estimate — edges stop as soon as they find content)" : "");
   }
 
   $("bounds").addEventListener("input", refreshZooms);
