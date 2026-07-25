@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tile border tracer</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1a1a1a; --muted:#6b7280; --line:#d4d4d8; --panel:#f6f6f7;
+    --ok:#16a34a; --bad:#dc2626; --warn:#b45309; --accent:#2563eb; --path:#2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#17181a; --fg:#e8e8ea; --muted:#9ca3af; --line:#34353a; --panel:#202126;
+      --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b; --accent:#60a5fa; --path:#60a5fa;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+    margin:0 0 16px; background:var(--panel); }
+  legend { padding:0 6px; font-weight:600; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  input, textarea, select, button { font:inherit; color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; padding:6px 9px; }
+  input[type=text], textarea { width:100%; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  textarea { min-height:108px; resize:vertical; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:transparent;
+    font-weight:600; padding:7px 16px; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.secondary { background:transparent; color:var(--fg); border-color:var(--line); font-weight:400; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
+  .actions { display:flex; gap:10px; margin-top:14px; align-items:center; flex-wrap:wrap; }
+  canvas { border:1px solid var(--line); border-radius:6px; image-rendering:pixelated;
+    max-width:100%; background:var(--panel); }
+  .legend { display:flex; gap:16px; font-size:12px; color:var(--muted); margin:8px 0 0; flex-wrap:wrap; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font-size:13px; width:100%; }
+  th, td { text-align:left; padding:5px 10px 5px 0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .mono { font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  .ok{color:var(--ok);} .bad{color:var(--bad);} .warn{color:var(--warn);} .muted{color:var(--muted);}
+  .note { font-size:12.5px; color:var(--muted); margin:8px 0 0; }
+  #status { font-variant-numeric:tabular-nums; }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:12px; overflow-x:auto; font-size:12px; margin:10px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Tile border tracer</h1>
+<p class="sub">
+  Finds a tile on the edge of the imagery and then walks the border tile by tile,
+  the way a snake follows a wall, until it arrives back where it started. Cost
+  scales with the <b>perimeter</b>, not the area — and unlike measuring four
+  edges, it can tell you whether the shape it walked round is actually a
+  rectangle.
+</p>
+
+<fieldset>
+  <legend>Source</legend>
+  <label for="tpl">Tile URL template</label>
+  <input type="text" id="tpl"
+    value="https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg">
+  <div class="row">
+    <div style="flex:1 1 220px">
+      <label for="code">Version code</label>
+      <input type="text" id="code" value="900014458">
+    </div>
+    <div>
+      <label for="rps">Requests/sec</label>
+      <input type="number" id="rps" value="12" min="1" max="60" style="width:90px">
+    </div>
+    <div>
+      <label for="maxreq">Request cap per zoom</label>
+      <input type="number" id="maxreq" value="6000" min="200" max="60000" style="width:130px">
+    </div>
+    <div>
+      <label for="parts">Max separate regions</label>
+      <input type="number" id="parts" value="6" min="1" max="20" style="width:130px">
+    </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Declared bounds</legend>
+  <label for="bounds">boundsByZoom JSON</label>
+  <textarea id="bounds" spellcheck="false">{
+  "11": { "minX": 555, "maxX": 564, "minY": 851, "maxY": 859 },
+  "12": { "minX": 1114, "maxX": 1125, "minY": 1706, "maxY": 1715 },
+  "13": { "minX": 2228, "maxX": 2251, "minY": 3412, "maxY": 3431 },
+  "14": { "minX": 4456, "maxX": 4503, "minY": 6824, "maxY": 6863 },
+  "15": { "minX": 8928, "maxX": 8987, "minY": 13672, "maxY": 13699 },
+  "16": { "minX": 17856, "maxX": 17975, "minY": 27344, "maxY": 27399 },
+  "17": { "minX": 35712, "maxX": 35951, "minY": 54688, "maxY": 54799 },
+  "18": { "minX": 71424, "maxX": 71903, "minY": 109376, "maxY": 109599 },
+  "19": { "minX": 143264, "maxX": 143455, "minY": 218752, "maxY": 219199 },
+  "20": { "minX": 286528, "maxX": 286911, "minY": 437504, "maxY": 438399 }
+}</textarea>
+  <div class="row" style="margin-top:12px">
+    <div><label for="zoom">Zoom</label><select id="zoom"></select></div>
+  </div>
+  <div class="actions">
+    <button id="run">Trace this zoom</button>
+    <button id="runAll" class="secondary">Trace every zoom</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <span id="status" class="muted"></span>
+  </div>
+</fieldset>
+
+<h2>What it walked</h2>
+<canvas id="map" width="600" height="240"></canvas>
+<div class="legend">
+  <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
+  <span><span class="sw" style="background:#dc2626"></span>no tile</span>
+  <span><span class="sw" style="background:#2563eb"></span>border it walked</span>
+  <span id="orient" class="muted"></span>
+</div>
+
+<h2>Results</h2>
+<div class="scroll">
+  <table id="results">
+    <thead><tr>
+      <th>zoom</th><th>requests</th><th>regions</th><th>border</th>
+      <th>declared box</th><th>traced box</th><th>shape</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<pre id="summary" hidden></pre>
+<div class="actions"><button id="copy" class="secondary" disabled>Copy results</button></div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let stopped = false, requests = 0, capped = false;
+  const rows = [];
+
+  // Clockwise from north-west. Order matters: the tracer rotates through this
+  // ring, so a different order walks the border the other way round.
+  const RING = [[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0]];
+
+  // -- probing ------------------------------------------------------------
+
+  let nextSlot = 0;
+  async function gate() {
+    const gap = 1000 / Math.max(1, +$("rps").value || 12);
+    const wait = Math.max(0, nextSlot - performance.now());
+    nextSlot = performance.now() + wait + gap;
+    if (wait > 0) await sleep(wait);
+  }
+
+  function url(z, x, y) {
+    return $("tpl").value
+      .replaceAll("{code}", $("code").value.trim())
+      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  function probeRaw(u) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true; clearTimeout(t);
+        img.onload = img.onerror = null; img.src = "";
+        resolve(v);
+      };
+      const t = setTimeout(() => done(false), 15000);
+      img.onload = () => done(img.naturalWidth > 0);
+      img.onerror = () => done(false);
+      img.src = u;
+    });
+  }
+
+  // Every lookup goes through this cache. The tracer asks about the same tile
+  // repeatedly -- each step inspects up to eight neighbours, most of which the
+  // previous step already inspected -- so without it the walk would cost
+  // several times what it should.
+  let cache = new Map(), limits = null, zoom = 0;
+
+  async function exists(x, y) {
+    if (limits && (x < limits.minX || x > limits.maxX || y < limits.minY || y > limits.maxY)) {
+      return false;  // Outside the search window: treat as empty, do not ask.
+    }
+    const key = x + "," + y;
+    if (cache.has(key)) return cache.get(key);
+    if (capped || stopped) return false;
+    if (requests >= Math.max(200, +$("maxreq").value || 6000)) { capped = true; return false; }
+    await gate();
+    requests++;
+    const got = await probeRaw(url(zoom, x, y));
+    cache.set(key, got);
+    paint(x, y, got ? "#22c55e" : "#dc2626");
+    if (requests % 15 === 0) {
+      $("status").textContent = `z${zoom}: ${requests.toLocaleString()} requests`;
+    }
+    return got;
+  }
+
+  // -- canvas -------------------------------------------------------------
+
+  let view = null;
+  function setupCanvas(b) {
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    const cell = Math.max(1, Math.min(12, Math.floor(900 / w)));
+    canvas.width = w * cell; canvas.height = h * cell;
+    ctx.fillStyle = "#6b7280"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    view = { cell, b };
+    $("orient").textContent = `${w} × ${h} tiles · north at top, west at left`;
+  }
+  function paint(x, y, colour) {
+    if (!view) return;
+    const cx = (x - view.b.minX) * view.cell, cy = (y - view.b.minY) * view.cell;
+    if (cx < 0 || cy < 0 || cx >= canvas.width || cy >= canvas.height) return;
+    ctx.fillStyle = colour;
+    ctx.fillRect(cx, cy, view.cell, view.cell);
+  }
+
+  // -- the walk -----------------------------------------------------------
+
+  const ringIndex = (px, py, qx, qy) =>
+    RING.findIndex(([dx, dy]) => px + dx === qx && py + dy === qy);
+
+  // Moore-neighbour tracing. From a tile known to be on the border, rotate
+  // around it starting from the empty tile we arrived from, take the first
+  // filled neighbour, and repeat. Jacob's criterion stops it: the same
+  // (tile, arrived-from) pair means the loop has closed.
+  async function traceFrom(seedX, seedY) {
+    // Walk west until the next tile west is empty -- that is a border tile,
+    // and starting anywhere else risks tracing off in the wrong direction.
+    let sx = seedX, sy = seedY;
+    while (await exists(sx - 1, sy)) sx--;
+    let bx = sx - 1, by = sy;
+
+    const contour = [[sx, sy]];
+    const filled = new Set([sx + "," + sy]);
+    const states = new Set();
+    let px = sx, py = sy;
+
+    for (let step = 0; step < 200000; step++) {
+      if (stopped || capped) break;
+      const state = `${px},${py},${bx},${by}`;
+      if (states.has(state)) break;
+      states.add(state);
+
+      const start = ringIndex(px, py, bx, by);
+      let moved = false;
+      for (let k = 1; k <= 8; k++) {
+        const j = (start + k) % 8;
+        const cx = px + RING[j][0], cy = py + RING[j][1];
+        if (await exists(cx, cy)) {
+          const prev = (j + 7) % 8;
+          bx = px + RING[prev][0]; by = py + RING[prev][1];
+          px = cx; py = cy;
+          contour.push([px, py]);
+          filled.add(px + "," + py);
+          moved = true;
+          break;
+        }
+      }
+      if (!moved) break;  // A single isolated tile.
+    }
+    for (const [x, y] of contour) paint(x, y, "#2563eb");
+    return { contour, filled };
+  }
+
+  function boxOf(points) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [x, y] of points) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
+  // A solid rectangle's outer border is exactly the perimeter of its own
+  // bounding box. So: does every tile walked sit on that perimeter, and are
+  // there as many distinct ones as the perimeter has? Both must hold.
+  function isRectangle(filled, box) {
+    const w = box.maxX - box.minX + 1, h = box.maxY - box.minY + 1;
+    const expected = w === 1 || h === 1 ? w * h : 2 * w + 2 * h - 4;
+    let off = 0;
+    for (const key of filled) {
+      const [x, y] = key.split(",").map(Number);
+      const onEdge = x === box.minX || x === box.maxX || y === box.minY || y === box.maxY;
+      if (!onEdge) off++;
+    }
+    return { rectangle: off === 0 && filled.size === expected, off, expected, got: filled.size };
+  }
+
+  // -- per zoom -----------------------------------------------------------
+
+  // Look for a filled tile that no walk so far has accounted for, on a lattice
+  // that gets finer each pass. Cached results make re-treading free, so the
+  // later passes only pay for ground not already covered.
+  //
+  // This has to probe rather than sift what is already cached: a region the
+  // walks never went near has no cached tiles at all, and consulting the cache
+  // alone would report one region for a map that has several.
+  // Budgeted by point count rather than by a fixed divisor. Dividing the box
+  // into 32ths sounds coarse but collapses to every single tile once the box
+  // is small, turning "check nothing else is out there" into a full sweep.
+  const inside = (box, x, y) =>
+    x >= box.minX && x <= box.maxX && y >= box.minY && y <= box.maxY;
+
+  async function findSeed(b, claimed, done) {
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    for (const target of [9, 49, 225, 900]) {
+      const side = Math.sqrt(target);
+      const stepX = Math.max(1, Math.ceil(w / side));
+      const stepY = Math.max(1, Math.ceil(h / side));
+      for (let y = b.minY; y <= b.maxY; y += stepY) {
+        for (let x = b.minX; x <= b.maxX; x += stepX) {
+          if (stopped || capped) return null;
+          if (claimed.has(x + "," + y)) continue;
+          // Skip ground already walked, without paying to re-probe it. This is
+          // why the sweep is affordable: after one region is traced its whole
+          // footprint drops out of the search.
+          //
+          // The cost is that a region sitting entirely inside another's
+          // bounding box -- an island in a lake -- goes unreported. Holes are
+          // not what this is checking for, and finding them means scanning the
+          // interior, which is the thing being avoided.
+          if (done.some((box) => inside(box, x, y))) continue;
+          if (await exists(x, y)) return [x, y];
+        }
+      }
+    }
+    return null;
+  }
+
+  async function runZoom(z, declared) {
+    zoom = z;
+    requests = 0; capped = false; cache = new Map();
+    // Allow the walk a margin outside the declared box, so a border that runs
+    // beyond it is visible rather than silently clipped.
+    const margin = 8;
+    limits = {
+      minX: declared.minX - margin, maxX: declared.maxX + margin,
+      minY: declared.minY - margin, maxY: declared.maxY + margin,
+    };
+    setupCanvas(limits);
+
+    const regions = [];
+    const claimed = new Set();
+    const seen = new Set();
+    //: Bounding boxes of walks already done, so the seed search skips them.
+    const walked = [];
+    const maxParts = Math.max(1, +$("parts").value || 6);
+
+    // Two separate limits: how many distinct regions to report, and how many
+    // seeds to try. A seed landing inside a region already walked re-walks it
+    // for free -- every tile is cached by then -- so the duplicate check below
+    // costs nothing but still needs a budget to run in.
+    for (let attempt = 0; attempt < maxParts * 50 && regions.length < maxParts; attempt++) {
+      if (stopped || capped) break;
+      const seed = await findSeed(declared, claimed, walked);
+      if (!seed) break;
+      claimed.add(seed.join(","));
+
+      const { contour, filled } = await traceFrom(seed[0], seed[1]);
+      if (!contour.length) continue;
+      for (const k of filled) claimed.add(k);
+
+      const box = boxOf(contour);
+      walked.push(box);
+
+      // A seed elsewhere in the same region produces the same walk. Recognise
+      // it rather than reporting one region several times.
+      const key = `${box.minX},${box.maxX},${box.minY},${box.maxY},${filled.size}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      regions.push({ contour, filled, box, ...isRectangle(filled, box) });
+    }
+
+    return { z, declared, regions, requests, capped };
+  }
+
+  function describe(r) {
+    if (!r.regions.length) {
+      return ['<span class="bad">no imagery found</span>', "no imagery found"];
+    }
+    const parts = [];
+    if (r.regions.length > 1) parts.push(`${r.regions.length} separate regions`);
+    const bad = r.regions.filter((g) => !g.rectangle);
+    if (!bad.length) {
+      parts.push(r.regions.length > 1 ? "each a rectangle" : "a rectangle");
+    } else {
+      const g = bad[0];
+      parts.push(
+        g.off > 0
+          ? `not a rectangle — ${g.off} border tile(s) inside the box edge`
+          : `not a rectangle — border is ${g.got} tiles, a rectangle would be ${g.expected}`
+      );
+    }
+    if (r.capped) parts.push("hit the request cap");
+    const text = parts.join(", ");
+    const cls = bad.length || r.capped ? "bad" : (r.regions.length > 1 ? "warn" : "ok");
+    return [`<span class="${cls}">${text}</span>`, text];
+  }
+
+  function addRow(r) {
+    const [html, text] = describe(r);
+    const d = r.declared;
+    const all = r.regions.flatMap((g) => g.contour);
+    const box = all.length ? boxOf(all) : null;
+    const border = r.regions.reduce((n, g) => n + g.filled.size, 0);
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.z}</td><td>${r.requests.toLocaleString()}</td>` +
+      `<td>${r.regions.length}</td><td>${border.toLocaleString()}</td>` +
+      `<td class="mono">${d.minX}-${d.maxX}, ${d.minY}-${d.maxY}</td>` +
+      `<td class="mono">${box ? `${box.minX}-${box.maxX}, ${box.minY}-${box.maxY}` : "—"}</td>` +
+      `<td>${html}</td>`;
+    $("results").tBodies[0].appendChild(tr);
+    rows.push(
+      `z${r.z}\t${r.requests} requests\t${r.regions.length} region(s)\tborder ${border}` +
+      `\tdeclared ${d.minX}-${d.maxX},${d.minY}-${d.maxY}` +
+      `\ttraced ${box ? `${box.minX}-${box.maxX},${box.minY}-${box.maxY}` : "none"}\t${text}`
+    );
+    $("copy").disabled = false;
+  }
+
+  function busy(on) {
+    $("run").disabled = on; $("runAll").disabled = on; $("stop").disabled = !on;
+  }
+
+  function parseBounds() {
+    try {
+      const raw = JSON.parse($("bounds").value), out = {};
+      for (const k of Object.keys(raw)) {
+        const z = parseInt(k, 10);
+        if (!Number.isFinite(z)) continue;
+        const b = raw[k];
+        out[z] = { minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY };
+      }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  async function go(zooms) {
+    const bounds = parseBounds();
+    if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
+    stopped = false; busy(true);
+    try {
+      for (const z of zooms) {
+        if (stopped) break;
+        addRow(await runZoom(z, bounds[z]));
+      }
+      $("status").textContent = stopped ? "stopped" : "done";
+    } finally { busy(false); }
+  }
+
+  function refreshZooms() {
+    const bounds = parseBounds(), sel = $("zoom"), prev = sel.value;
+    sel.innerHTML = "";
+    if (!bounds) return;
+    for (const z of Object.keys(bounds).map(Number).sort((a, b) => a - b)) {
+      const o = document.createElement("option");
+      const b = bounds[z];
+      const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+      o.value = z;
+      o.textContent = `z${z}  (perimeter about ${(2 * w + 2 * h).toLocaleString()} tiles)`;
+      sel.appendChild(o);
+    }
+    if (prev) sel.value = prev;
+  }
+
+  $("bounds").addEventListener("input", refreshZooms);
+  $("run").addEventListener("click", () => go([+$("zoom").value]));
+  $("runAll").addEventListener("click", () => {
+    const b = parseBounds();
+    if (b) go(Object.keys(b).map(Number).sort((x, y) => x - y));
+  });
+  $("stop").addEventListener("click", () => { stopped = true; $("status").textContent = "stopping…"; });
+  $("copy").addEventListener("click", () => {
+    const text = rows.join("\n");
+    $("summary").hidden = false; $("summary").textContent = text;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+  });
+
+  refreshZooms();
+})();
+</script>
+</body>
+</html>
