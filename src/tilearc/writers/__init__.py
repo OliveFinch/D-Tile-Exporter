@@ -34,7 +34,9 @@ def default_output(plan: JobPlan, fmt: str) -> Path:
     return Path(stem)
 
 
-def build_writer(fmt: str, output: Path, plan: JobPlan) -> TileWriter:
+def build_writer(
+    fmt: str, output: Path, plan: JobPlan, *, snapshot_date: str | None = None
+) -> TileWriter:
     if fmt == "zip":
         return ZipWriter(output, plan)
     if fmt == "dir":
@@ -44,7 +46,7 @@ def build_writer(fmt: str, output: Path, plan: JobPlan) -> TileWriter:
     if fmt == "library":
         from ..library import LibraryWriter
 
-        return LibraryWriter(output, plan)
+        return LibraryWriter(output, plan, snapshot_date=snapshot_date)
     raise ValueError(f"unknown output format: {fmt}")
 
 

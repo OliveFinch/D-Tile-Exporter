@@ -131,6 +131,10 @@ class ParkConfig:
     tile_extension: str = "jpg"
     #: True when tiles are unreachable without operator-supplied credentials.
     requires_credentials: bool = False
+    #: False for a park that serves one live map and keeps no old versions.
+    #: DLP is the case: no selectable servers, always current. An archive of
+    #: such a park is identified by when it was taken, not by a version code.
+    supports_history: bool = True
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -324,6 +328,9 @@ def parse_park_config(park_id: str, payload: Mapping[str, Any]) -> ParkConfig:
         bounds_by_zoom=bounds,
         tile_extension=extension,
         requires_credentials=requires_credentials,
+        supports_history=bool(
+            payload.get("supportsHistory", payload.get("supports_history", True))
+        ),
         raw=payload,
     )
 

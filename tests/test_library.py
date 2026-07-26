@@ -242,3 +242,75 @@ def test_a_reopened_catalogue_sees_what_an_earlier_run_wrote(tmp_path):
         ) is not None
     finally:
         reopened.close()
+
+
+# ---------------------------------------------------------------------------
+# a park with no version history
+# ---------------------------------------------------------------------------
+
+
+def dlp_plan(version: str = "current") -> JobPlan:
+    """Disneyland Paris: one live map, no selectable servers."""
+    park = ParkConfig(
+        park_id="dlp", label="Disneyland Paris",
+        tile_template="https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg",
+        min_zoom=13, max_zoom=13, y_scheme="xyz",
+        bounds_by_zoom={13: TileBounds(0, 1, 0, 1)},
+        supports_history=False,
+    )
+    return JobPlan(park=park, version=VersionEntry(code=version),
+                   zooms=[ZoomPlan(13, TileBounds(0, 1, 0, 1))], modes=[])
+
+
+def test_a_park_with_no_history_is_filed_by_date(tmp_path):
+    """'current' is not an identity. Two downloads of it are two snapshots."""
+    from tilearc.library import archive_version
+
+    assert archive_version(dlp_plan(), snapshot_date="2026-07-26") == "2026-07-26"
+    # A park that does keep versions still uses the code.
+    assert archive_version(plan_for("47")) == "47"
+
+
+def test_two_snapshots_of_the_same_live_map_do_not_collide(tmp_path):
+    for date, tiles in [
+        ("2026-07-26", {(13, 0, 0): b"before", (13, 0, 1): b"unchanged"}),
+        ("2026-08-15", {(13, 0, 0): b"AFTER", (13, 0, 1): b"unchanged"}),
+    ]:
+        writer = LibraryWriter(tmp_path, dlp_plan(), snapshot_date=date)
+        writer.open()
+        for (z, x, y), data in tiles.items():
+            writer.write_tile(z, x, y, "", data)
+        writer.finalize({}, complete=True)
+        writer.catalogue.close()
+
+    assert (tmp_path / "dlp" / "2026-07-26" / "13" / "0" / "0.jpg").read_bytes() == b"before"
+    assert (tmp_path / "dlp" / "2026-08-15" / "13" / "0" / "0.jpg").read_bytes() == b"AFTER"
+    # The tile that did not change is stored once, under the first snapshot.
+    assert not (tmp_path / "dlp" / "2026-08-15" / "13" / "0" / "1.jpg").exists()
+
+    catalogue = Catalogue(tmp_path)
+    try:
+        path = catalogue.resolve("dlp", "2026-08-15", 13, 0, 1)
+        assert path.read_bytes() == b"unchanged"
+        assert "2026-07-26" in path.parts
+    finally:
+        catalogue.close()
+
+
+def test_each_library_job_gets_its_own_resume_state(tmp_path):
+    """The library root is shared, so the state path cannot come from it alone.
+
+    It did, and the second job of any library found the first job's state in
+    the file and refused to start.
+    """
+    from tilearc.job import JobRequest
+
+    wdw = JobRequest(plan=plan_for("47"), sources={}, fmt="library", output=tmp_path)
+    dlp = JobRequest(plan=dlp_plan(), sources={}, fmt="library", output=tmp_path,
+                     snapshot_date="2026-07-26")
+    other = JobRequest(plan=plan_for("105"), sources={}, fmt="library", output=tmp_path)
+
+    paths = {wdw.resolved_state_path(), dlp.resolved_state_path(), other.resolved_state_path()}
+    assert len(paths) == 3, f"jobs share a state file: {paths}"
+    assert "wdw" in str(wdw.resolved_state_path())
+    assert "2026-07-26" in str(dlp.resolved_state_path())

@@ -43,6 +43,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -51,6 +52,24 @@ from .plan import JobPlan
 from .writers.base import TileWriter
 
 CATALOGUE_NAME = "catalogue.sqlite"
+
+
+def archive_version(plan: JobPlan, snapshot_date: str | None = None) -> str:
+    """What this job's tiles are filed under.
+
+    Normally the version code, because that is what identifies the map. For a
+    park that keeps no history it cannot be: DLP serves one live map with no
+    selectable servers, so every download of it is the same "current" and would
+    overwrite the last. Such a park is filed by the date it was taken, which
+    makes repeated downloads a series of dated snapshots -- and, since the
+    library only stores what changed, each later one holds exactly what DLP
+    altered since the previous.
+    """
+    if plan.park.supports_history:
+        return plan.version.code
+    return snapshot_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
@@ -254,12 +273,18 @@ class LibraryWriter(TileWriter):
     #: version, which the filesystem alone cannot tell you.
     verifies_existing = True
 
-    def __init__(self, output: Path, plan: JobPlan, catalogue: Catalogue | None = None) -> None:
+    def __init__(
+        self,
+        output: Path,
+        plan: JobPlan,
+        catalogue: Catalogue | None = None,
+        snapshot_date: str | None = None,
+    ) -> None:
         super().__init__(output, plan)
         # `output` is the library root, shared by every park and version.
         self.catalogue = catalogue or Catalogue(self.output)
         self.park = plan.park.park_id
-        self.version = plan.version.code
+        self.version = archive_version(plan, snapshot_date)
         self.root = self.catalogue.root / self.park / self.version
         self._made: set[Path] = set()
         self._pending = 0

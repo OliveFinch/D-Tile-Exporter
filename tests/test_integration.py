@@ -144,7 +144,7 @@ def test_end_to_end_mbtiles(mock_http, tmp_path):
 def test_dlp_jan2026_fetches_from_r2_not_the_disney_cdn(mock_http, tmp_path):
     download(
         "--park", "dlp", "--version", "jan2026", "--max-zoom", "13",
-        "-o", str(tmp_path / "a.zip"),
+        "--allow-rehosted", "-o", str(tmp_path / "a.zip"),
     )
     assert mock_http["requests"]
     assert all(url.startswith("https://pub-") for url in mock_http["requests"])
