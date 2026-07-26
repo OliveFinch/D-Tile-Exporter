@@ -81,11 +81,15 @@
     </div>
     <div>
       <label for="rps">Requests/sec</label>
-      <input type="number" id="rps" value="12" min="1" max="60" style="width:90px">
+      <input type="number" id="rps" value="24" min="1" max="120" style="width:90px">
+    </div>
+    <div>
+      <label for="conc">In flight at once</label>
+      <input type="number" id="conc" value="12" min="1" max="64" style="width:120px">
     </div>
     <div>
       <label for="maxreq">Request cap per zoom</label>
-      <input type="number" id="maxreq" value="6000" min="200" max="60000" style="width:130px">
+      <input type="number" id="maxreq" value="12000" min="200" max="120000" style="width:130px">
     </div>
     <div>
       <label for="parts">Max separate regions</label>
@@ -273,7 +277,13 @@
 
   // -- progress -----------------------------------------------------------
 
-  const state = { park: "", z: 0, zoomIndex: 0, zoomCount: 0, mapIndex: 0, mapCount: 0, started: 0 };
+  const state = { park: "", z: 0, zoomIndex: 0, zoomCount: 0, mapIndex: 0, mapCount: 0,
+                  started: 0, planned: 0, done: 0 };
+  //: Requests across the whole run, as opposed to `requests` for this zoom.
+  //  Measuring the rate actually achieved is the only way to say anything
+  //  truthful about when a run will finish -- what was asked for is a ceiling,
+  //  and against a slow CDN it is not the binding one.
+  let totalRequests = 0;
 
   function duration(ms) {
     const s = Math.round(ms / 1000);
@@ -289,12 +299,29 @@
     if (state.park) parts.push(state.park);
     if (state.zoomCount) parts.push(`z${state.z} (${state.zoomIndex}/${state.zoomCount})`);
     parts.push(`${requests.toLocaleString()} requests`);
-    if (state.started) parts.push(`${duration(Date.now() - state.started)} elapsed`);
+    if (state.started) {
+      const secs = (Date.now() - state.started) / 1000;
+      parts.push(`${duration(secs * 1000)} elapsed`);
+      if (secs > 5 && totalRequests > 20) {
+        const rate = totalRequests / secs;
+        parts.push(`${rate.toFixed(1)}/s`);
+        // Estimated from the rate being achieved, not the rate requested.
+        const left = state.planned - state.done - requests;
+        if (left > 0) parts.push(`~${duration(left / rate * 1000)} left`);
+      }
+    }
     if (suffix) parts.push(suffix);
     $("status").textContent = parts.join(" · ");
   }
 
   // -- probing ------------------------------------------------------------
+
+  // Two independent ceilings. `rps` spaces out when requests *start*; `conc`
+  // caps how many may be outstanding at once. Which one binds depends on the
+  // CDN: at ~0.7s round trips a single-file walk manages 1.4/s however
+  // generous the rate limit, because it is latency, not permission, that is
+  // in the way.
+  const width = () => Math.max(1, Math.min(64, +$("conc").value || 1));
 
   let nextSlot = 0;
   async function gate() {
@@ -303,6 +330,24 @@
     nextSlot = performance.now() + wait + gap;
     if (wait > 0) await sleep(wait);
   }
+
+  let inFlight = 0;
+  const queue = [];
+  async function acquireSlot() {
+    while (inFlight >= width()) await new Promise((r) => queue.push(r));
+    inFlight++;
+  }
+  function releaseSlot() {
+    inFlight--;
+    const next = queue.shift();
+    if (next) next();
+  }
+
+  // Run `jobs` with at most `width()` in flight, and hand back the results in
+  // the order asked for. Callers depend on that order: the walk takes the
+  // first filled neighbour going round the ring, and "first" has to keep
+  // meaning first however the responses happen to land.
+  const inOrder = (jobs) => Promise.all(jobs.map((job) => job()));
 
   // An <img> that fails to load looks exactly like a tile that is not there,
   // so a dropped connection would otherwise be recorded as "no imagery" for
@@ -343,7 +388,20 @@
   // repeatedly -- each step inspects up to eight neighbours, most of which the
   // previous step already inspected -- so without it the walk would cost
   // several times what it should.
-  let cache = new Map(), limits = null, zoom = 0;
+  let cache = new Map(), pending = new Map(), limits = null, zoom = 0;
+
+  async function fetchTile(x, y) {
+    await waitForNetwork();
+    if (stopped) return false;
+    await gate();
+    await acquireSlot();
+    requests++; totalRequests++;
+    try {
+      return await probeRaw(url(zoom, x, y));
+    } finally {
+      releaseSlot();
+    }
+  }
 
   async function exists(x, y) {
     if (limits && (x < limits.minX || x > limits.maxX || y < limits.minY || y > limits.maxY)) {
@@ -351,17 +409,25 @@
     }
     const key = x + "," + y;
     if (cache.has(key)) return cache.get(key);
+    // Concurrency makes overlapping asks for the same tile routine rather than
+    // rare -- the ring a step ahead shares most of its neighbours with this
+    // one. Without joining the request already out, the cache would stop
+    // paying for itself exactly when it matters most.
+    if (pending.has(key)) return pending.get(key);
     if (capped || stopped) return false;
-    if (requests >= Math.max(200, +$("maxreq").value || 6000)) { capped = true; return false; }
-    await waitForNetwork();
-    if (stopped) return false;
-    await gate();
-    requests++;
-    const got = await probeRaw(url(zoom, x, y));
-    cache.set(key, got);
-    paint(x, y, got ? "#22c55e" : "#dc2626");
-    if (requests % 15 === 0) tick();
-    return got;
+    if (requests + pending.size >= Math.max(200, +$("maxreq").value || 12000)) {
+      capped = true;
+      return false;
+    }
+    const probe = fetchTile(x, y).then((got) => {
+      pending.delete(key);
+      cache.set(key, got);
+      paint(x, y, got ? "#22c55e" : "#dc2626");
+      if (requests % 15 === 0) tick();
+      return got;
+    });
+    pending.set(key, probe);
+    return probe;
   }
 
   // -- canvas -------------------------------------------------------------
@@ -399,8 +465,18 @@
   async function traceFrom(seedX, seedY) {
     // Walk west until the next tile west is empty -- that is a border tile,
     // and starting anywhere else risks tracing off in the wrong direction.
+    // Asked a run at a time rather than a hop at a time; the tiles past the
+    // edge cost one batch and land in the cache the walk is about to use.
     let sx = seedX, sy = seedY;
-    while (await exists(sx - 1, sy)) sx--;
+    for (;;) {
+      const span = Math.min(width(), 16);
+      const xs = [];
+      for (let i = 1; i <= span; i++) xs.push(sx - i);
+      const got = await inOrder(xs.map((x) => () => exists(x, sy)));
+      const gap = got.indexOf(false);
+      sx -= gap === -1 ? span : gap;
+      if (gap !== -1 || stopped || capped) break;
+    }
     let bx = sx - 1, by = sy;
 
     const contour = [[sx, sy]];
@@ -415,19 +491,32 @@
       states.add(state);
 
       const start = ringIndex(px, py, bx, by);
-      let moved = false;
+      // Ask about the next few neighbours together instead of waiting out a
+      // round trip before asking about the one after. The answer is still the
+      // first filled tile in ring order -- speculation changes what is asked,
+      // never what is chosen -- and the extra asks are rarely wasted, because
+      // consecutive border tiles share most of their ring. At width 1 this is
+      // the strictly sequential walk it replaces.
+      const look = Math.min(8, width());
+      const ring = [];
       for (let k = 1; k <= 8; k++) {
         const j = (start + k) % 8;
-        const cx = px + RING[j][0], cy = py + RING[j][1];
-        if (await exists(cx, cy)) {
-          const prev = (j + 7) % 8;
-          bx = px + RING[prev][0]; by = py + RING[prev][1];
-          px = cx; py = cy;
-          contour.push([px, py]);
-          filled.add(px + "," + py);
-          moved = true;
-          break;
-        }
+        ring.push([j, px + RING[j][0], py + RING[j][1]]);
+      }
+
+      let moved = false;
+      for (let base = 0; base < 8 && !moved; base += look) {
+        const slice = ring.slice(base, base + look);
+        const got = await inOrder(slice.map(([, cx, cy]) => () => exists(cx, cy)));
+        const hit = got.indexOf(true);
+        if (hit === -1) continue;
+        const [j, cx, cy] = slice[hit];
+        const prev = (j + 7) % 8;
+        bx = px + RING[prev][0]; by = py + RING[prev][1];
+        px = cx; py = cy;
+        contour.push([px, py]);
+        filled.add(px + "," + py);
+        moved = true;
       }
       if (!moved) break;  // A single isolated tile.
     }
@@ -480,6 +569,18 @@
       const side = Math.sqrt(target);
       const stepX = Math.max(1, Math.ceil(w / side));
       const stepY = Math.max(1, Math.ceil(h / side));
+      // The lattice has no order dependency at all -- nothing about one point
+      // decides whether the next is worth asking -- so it goes out in batches
+      // and still yields the first hit in lattice order.
+      let batch = [];
+      const drain = async () => {
+        if (!batch.length) return null;
+        const slice = batch;
+        batch = [];
+        const got = await inOrder(slice.map(([x, y]) => () => exists(x, y)));
+        const hit = got.indexOf(true);
+        return hit === -1 ? null : slice[hit];
+      };
       for (let y = b.minY; y <= b.maxY; y += stepY) {
         for (let x = b.minX; x <= b.maxX; x += stepX) {
           if (stopped || capped) return null;
@@ -493,9 +594,15 @@
           // not what this is checking for, and finding them means scanning the
           // interior, which is the thing being avoided.
           if (done.some((box) => inside(box, x, y))) continue;
-          if (await exists(x, y)) return [x, y];
+          batch.push([x, y]);
+          if (batch.length >= width()) {
+            const found = await drain();
+            if (found) return found;
+          }
         }
       }
+      const found = await drain();
+      if (found) return found;
     }
     return null;
   }
@@ -515,7 +622,7 @@
 
   async function runZoom(z, declared) {
     zoom = z;
-    requests = 0; capped = false; cache = new Map();
+    requests = 0; capped = false; cache = new Map(); pending = new Map();
     // Allow the walk a margin outside the declared box, so a border that runs
     // beyond it is visible rather than silently clipped.
     const margin = Math.max(0, +$("margin").value || 0);
@@ -669,7 +776,7 @@
   // tile once the neighbour cache is warm, plus the seed search. Good enough to
   // answer "will this finish by morning?".
   function estimate(bounds) {
-    const cap = Math.max(200, +$("maxreq").value || 6000);
+    const cap = Math.max(200, +$("maxreq").value || 12000);
     let total = 0;
     for (const z of Object.keys(bounds)) {
       const b = bounds[z];
@@ -679,18 +786,37 @@
     return total;
   }
 
-  function updateEstimate() {
+  //: A middling CDN round trip, in seconds. Only used before a run has
+  //  measured the real one -- the status line switches to observed rate as
+  //  soon as there is enough of a run to divide by.
+  const ASSUMED_LATENCY = 0.7;
+
+  // Whichever ceiling is lower is the one that decides. Quoting the rate limit
+  // alone is how the first overnight run got predicted at an hour and took
+  // seven: at width 1 no rate limit above 1.4/s means anything.
+  function achievable() {
     const rps = Math.max(1, +$("rps").value || 12);
+    return Math.min(rps, width() / ASSUMED_LATENCY);
+  }
+
+  function updateEstimate() {
+    const rate = achievable();
     const here = parseBounds();
     const all = PARKS.reduce((n, p) => n + estimate(p.bounds), 0);
     const parts = [];
     if (here) {
       const mine = estimate(here);
-      parts.push(`This map: roughly ${mine.toLocaleString()} requests, about ${duration(mine / rps * 1000)}.`);
+      parts.push(`This map: roughly ${mine.toLocaleString()} requests, about ${duration(mine / rate * 1000)}.`);
     }
     parts.push(
       `All ${PARKS.length} maps: roughly ${all.toLocaleString()} requests, ` +
-      `about ${duration(all / rps * 1000)} at ${rps}/s.`
+      `about ${duration(all / rate * 1000)}.`
+    );
+    const rps = Math.max(1, +$("rps").value || 12);
+    parts.push(
+      rate < rps - 0.05
+        ? `Held to about ${rate.toFixed(0)}/s by ${width()} in flight at ~${ASSUMED_LATENCY}s per tile, not by the ${rps}/s limit.`
+        : `At the ${rps}/s limit, with ${width()} in flight.`
     );
     $("estimate").textContent = parts.join(" ");
   }
@@ -763,8 +889,14 @@
       state.z = zooms[i]; state.zoomIndex = i + 1;
       requests = 0; tick();
       addRow(mapLabel, await runZoom(zooms[i], declared));
+      state.done += requests;
     }
   }
+
+  //: The subset of a bounds object covering just the zooms about to be run,
+  //  so the "time left" figure is measured against what was actually asked for.
+  const subset = (bounds, zooms) =>
+    Object.fromEntries(zooms.filter((z) => bounds[z]).map((z) => [z, bounds[z]]));
 
   // One map, from whatever is currently in the form.
   async function go(zooms) {
@@ -772,6 +904,7 @@
     if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
     stopped = false; busy(true); await acquireWake();
     state.mapIndex = 1; state.mapCount = 1; state.started = Date.now();
+    state.planned = estimate(subset(bounds, zooms)); state.done = 0; totalRequests = 0;
     try {
       await runSeries(park.label, zooms, bounds);
       tick(stopped ? "stopped" : "done");
@@ -782,6 +915,8 @@
   async function goEverything() {
     stopped = false; busy(true); await acquireWake();
     state.mapCount = PARKS.length; state.started = Date.now();
+    state.planned = PARKS.reduce((n, p) => n + estimate(p.bounds), 0);
+    state.done = 0; totalRequests = 0;
     try {
       for (let i = 0; i < PARKS.length; i++) {
         if (stopped) break;
@@ -838,6 +973,15 @@
 
   $("bounds").addEventListener("input", () => { refreshZooms(); updateEstimate(); });
   $("rps").addEventListener("input", updateEstimate);
+  $("conc").addEventListener("input", () => {
+    updateEstimate();
+    // Raising the width mid-run should take effect now, not at the next zoom:
+    // wake whatever is queued so the extra slots get used.
+    for (let i = queue.length; i > 0 && inFlight < width(); i--) {
+      const next = queue.shift();
+      if (next) next();
+    }
+  });
   $("maxreq").addEventListener("input", updateEstimate);
 
   $("run").addEventListener("click", () => go([+$("zoom").value]));
