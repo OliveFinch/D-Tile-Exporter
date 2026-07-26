@@ -1,0 +1,1624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tile border tracer</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1a1a1a; --muted:#6b7280; --line:#d4d4d8; --panel:#f6f6f7;
+    --ok:#16a34a; --bad:#dc2626; --warn:#b45309; --accent:#2563eb; --path:#2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#17181a; --fg:#e8e8ea; --muted:#9ca3af; --line:#34353a; --panel:#202126;
+      --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b; --accent:#60a5fa; --path:#60a5fa;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+    margin:0 0 16px; background:var(--panel); }
+  legend { padding:0 6px; font-weight:600; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  label.inline { display:inline-flex; align-items:center; gap:6px; margin:0; }
+  input, textarea, select, button { font:inherit; color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; padding:6px 9px; }
+  input[type=text], textarea { width:100%; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  input[type=checkbox] { width:auto; }
+  textarea { min-height:108px; resize:vertical; }
+  select#park { width:100%; max-width:440px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:transparent;
+    font-weight:600; padding:7px 16px; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.secondary { background:transparent; color:var(--fg); border-color:var(--line); font-weight:400; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
+  .actions { display:flex; gap:10px; margin-top:14px; align-items:center; flex-wrap:wrap; }
+  canvas { border:1px solid var(--line); border-radius:6px; image-rendering:pixelated;
+    max-width:100%; background:var(--panel); }
+  .legend { display:flex; gap:16px; font-size:12px; color:var(--muted); margin:8px 0 0; flex-wrap:wrap; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font-size:13px; width:100%; }
+  th, td { text-align:left; padding:5px 10px 5px 0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .mono { font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  .ok{color:var(--ok);} .bad{color:var(--bad);} .warn{color:var(--warn);} .muted{color:var(--muted);}
+  .note { font-size:12.5px; color:var(--muted); margin:8px 0 0; }
+  #status { font-variant-numeric:tabular-nums; }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:12px; overflow-x:auto; font-size:12px; margin:10px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Tile border tracer</h1>
+<p class="sub">
+  Finds a tile on the edge of the imagery and then walks the border tile by tile,
+  the way a snake follows a wall, until it arrives back where it started. Cost
+  scales with the <b>perimeter</b>, not the area — and unlike measuring four
+  edges, it can tell you whether the shape it walked round is actually a
+  rectangle.
+</p>
+
+<fieldset>
+  <legend>Source</legend>
+  <label for="park">Map</label>
+  <select id="park"></select>
+  <p class="note" id="parknote"></p>
+
+  <label for="tpl">Tile URL template</label>
+  <input type="text" id="tpl">
+  <div class="row">
+    <div style="flex:1 1 220px">
+      <label for="code">Version code</label>
+      <input type="text" id="code">
+    </div>
+    <div>
+      <label for="rps">Requests/sec</label>
+      <input type="number" id="rps" value="24" min="1" max="120" style="width:90px">
+    </div>
+    <div>
+      <label for="conc">In flight at once</label>
+      <input type="number" id="conc" value="12" min="1" max="64" style="width:120px">
+    </div>
+    <div>
+      <label for="maxreq">Request cap per zoom</label>
+      <input type="number" id="maxreq" value="12000" min="200" max="120000" style="width:130px">
+    </div>
+    <div>
+      <label for="parts">Max separate regions</label>
+      <input type="number" id="parts" value="6" min="1" max="20" style="width:130px">
+    </div>
+    <div>
+      <label for="margin">Search margin</label>
+      <input type="number" id="margin" value="8" min="0" max="512" style="width:110px">
+    </div>
+    <div>
+      <label for="extra">Probes hunting more regions (0 = stop at the first)</label>
+      <input type="number" id="extra" value="0" min="0" max="5000" style="width:250px">
+    </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Declared bounds</legend>
+  <label for="bounds">boundsByZoom JSON</label>
+  <textarea id="bounds" spellcheck="false"></textarea>
+  <div class="row" style="margin-top:12px">
+    <div><label for="zoom">Zoom</label><select id="zoom"></select></div>
+  </div>
+  <div class="actions">
+    <button id="run">Trace this zoom</button>
+    <button id="runAll" class="secondary">Trace every zoom</button>
+    <button id="runEverything" class="secondary">Check every map and zoom</button>
+    <button id="runUnresolved" class="secondary" disabled>Re-check unresolved rows</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <label class="inline"><input type="checkbox" id="wake" checked> keep the screen awake</label>
+  </div>
+  <p class="note" id="status"></p>
+  <p class="note" id="estimate"></p>
+  <p class="note">
+    Built for long runs: results are written to the table as each zoom finishes and
+    kept in this browser, so a refresh or a crash does not lose the night's work.
+    If the network drops the run pauses rather than recording the whole map as
+    missing.
+  </p>
+  <p class="note">
+    By default a zoom finishes as soon as its border closes. Proving no
+    <em>other</em> piece of map exists means sweeping the declared box, which on a
+    map far smaller than its declared bounds costs more than the walk did and
+    turns the picture red. The cost of stopping is that a detached piece would go
+    unreported — raise “probes hunting more regions” where that is possible. A
+    hole <em>inside</em> the map is handled either way: the walk detects when it
+    has traced a hole's rim rather than the outside, and crosses it.
+  </p>
+</fieldset>
+
+<h2>What it walked</h2>
+<canvas id="map" width="600" height="240"></canvas>
+<div class="legend">
+  <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
+  <span><span class="sw" style="background:#dc2626"></span>no tile</span>
+  <span><span class="sw" style="background:#2563eb"></span>border it walked</span>
+  <span><span class="sw" style="background:#15803d"></span>enclosed — taken as imagery, never probed</span>
+  <span id="orient" class="muted"></span>
+</div>
+
+<h2>Results</h2>
+<div class="scroll">
+  <table id="results">
+    <thead><tr>
+      <th>map</th><th>zoom</th><th>requests</th><th>regions</th><th>border</th><th>covered</th>
+      <th>declared box</th><th>traced box</th><th>shape</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<pre id="summary" hidden></pre>
+<div class="actions">
+  <button id="copy" class="secondary" disabled>Copy results</button>
+  <button id="download" class="secondary" disabled>Download .tsv</button>
+  <button id="downloadJson" class="secondary" disabled>Download coverage .json</button>
+  <button id="clear" class="secondary" disabled>Clear results</button>
+</div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Every public Disney map, as declared in the viewer's parks/{id}/ configs.
+  // TDR is deliberately absent: its tiles are only reachable through a
+  // credentialled proxy, and an <img> probe cannot carry the signed cookies.
+  const PARKS = [
+    {
+      id: "wdw",
+      label: "Walt Disney World",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg",
+      code: "900014458",
+      codeLabel: "Jul '26 (Late)",
+      scheme: "xyz",
+      note: "Bounds shrink as zoom rises: deep detail is only drawn near the resort, so a smaller box at z19 than at z18 is data, not a bug.",
+      bounds: {
+        "11": { minX: 555, maxX: 564, minY: 851, maxY: 859 },
+        "12": { minX: 1118, maxX: 1125, minY: 1706, maxY: 1715 },
+        "13": { minX: 2228, maxX: 2251, minY: 3412, maxY: 3431 },
+        "14": { minX: 4456, maxX: 4503, minY: 6824, maxY: 6863 },
+        "15": { minX: 8928, maxX: 8987, minY: 13672, maxY: 13699 },
+        "16": { minX: 17856, maxX: 17975, minY: 27344, maxY: 27399 },
+        "17": { minX: 35712, maxX: 35951, minY: 54688, maxY: 54799 },
+        "18": { minX: 71424, maxX: 71903, minY: 109376, maxY: 109599 },
+        "19": { minX: 143264, maxX: 143455, minY: 218752, maxY: 219199 },
+        "20": { minX: 286528, maxX: 286911, minY: 437504, maxY: 438399 },
+      },
+    },
+    {
+      id: "dlr",
+      label: "Disneyland Resort (California)",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/disneyland/{code}/{z}/{x}/{y}.jpg",
+      code: "840388841",
+      codeLabel: "Jul '26 (Late)",
+      scheme: "xyz",
+      note: "",
+      bounds: {
+        "14": { minX: 2818, maxX: 2831, minY: 6549, maxY: 6560 },
+        "15": { minX: 5636, maxX: 5663, minY: 13102, maxY: 13117 },
+        "16": { minX: 11272, maxX: 11327, minY: 26208, maxY: 26231 },
+        "17": { minX: 22544, maxX: 22655, minY: 52416, maxY: 52463 },
+        "18": { minX: 45088, maxX: 45311, minY: 104832, maxY: 104927 },
+        "19": { minX: 90176, maxX: 90623, minY: 209664, maxY: 209855 },
+        "20": { minX: 180352, maxX: 181247, minY: 419328, maxY: 419739 },
+      },
+    },
+    {
+      id: "dlp",
+      label: "Disneyland Paris",
+      template: "https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg",
+      code: "current",
+      codeLabel: "Current",
+      scheme: "xyz",
+      note: "Its own host, and one live map only — the template carries no {code}, so the version box is ignored here.",
+      bounds: {
+        "13": { minX: 4156, maxX: 4161, minY: 2816, maxY: 2819 },
+        "14": { minX: 8312, maxX: 8323, minY: 5632, maxY: 5639 },
+        "15": { minX: 16624, maxX: 16647, minY: 11264, maxY: 11279 },
+        "16": { minX: 33248, maxX: 33295, minY: 22528, maxY: 22559 },
+        "17": { minX: 66496, maxX: 66591, minY: 45056, maxY: 45119 },
+        "18": { minX: 132992, maxX: 133183, minY: 90112, maxY: 90239 },
+        "19": { minX: 265984, maxX: 266367, minY: 180224, maxY: 180479 },
+        "20": { minX: 531968, maxX: 532735, minY: 360448, maxY: 360959 },
+      },
+    },
+    {
+      id: "hkdl",
+      label: "Hong Kong Disneyland",
+      template: "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/hkdl/{code}/{z}/{x}/{y}.jpg",
+      code: "51",
+      codeLabel: "Jun 2026",
+      scheme: "xyz",
+      note: "",
+      bounds: {
+        "14": { minX: 13380, maxX: 13383, minY: 7148, maxY: 7150 },
+        "15": { minX: 26762, maxX: 26765, minY: 14297, maxY: 14300 },
+        "16": { minX: 53524, maxX: 53531, minY: 28594, maxY: 28601 },
+        "17": { minX: 107048, maxX: 107063, minY: 57188, maxY: 57203 },
+        "18": { minX: 214096, maxX: 214127, minY: 114376, maxY: 114407 },
+        "19": { minX: 428192, maxX: 428255, minY: 228752, maxY: 228815 },
+        "20": { minX: 856384, maxX: 856511, minY: 457504, maxY: 457631 },
+      },
+    },
+    {
+      id: "shdr",
+      label: "Shanghai Disney Resort",
+      template: "https://secure.cdn1.wdpromedia.com/media/maps/prod/shdr-baidu-mob-en/{code}/{z}/{x}/{y}.jpg",
+      code: "981376074",
+      codeLabel: "Mar '26",
+      scheme: "tms",
+      note: "yScheme is tms: Y counts up from the south. These bounds are already in server space, so they go into the URL unflipped.",
+      bounds: {
+        "9": { minX: 103, maxX: 103, minY: 27, maxY: 27 },
+        "10": { minX: 206, maxX: 206, minY: 55, maxY: 55 },
+        "11": { minX: 412, maxX: 413, minY: 110, maxY: 111 },
+        "12": { minX: 825, maxX: 827, minY: 220, maxY: 222 },
+        "13": { minX: 1651, maxX: 1655, minY: 441, maxY: 444 },
+        "14": { minX: 3302, maxX: 3310, minY: 882, maxY: 889 },
+        "15": { minX: 6609, maxX: 6617, minY: 1768, maxY: 1776 },
+        "16": { minX: 13218, maxX: 13235, minY: 3536, maxY: 3553 },
+        "17": { minX: 26447, maxX: 26459, minY: 7084, maxY: 7095 },
+        "18": { minX: 52895, maxX: 52919, minY: 14168, maxY: 14191 },
+        "19": { minX: 105791, maxX: 105839, minY: 28336, maxY: 28383 },
+        "20": { minX: 211583, maxX: 211679, minY: 56672, maxY: 56767 },
+      },
+    },
+  ];
+
+  // Tokyo Disney Resort, through the viewer's own tile proxy. Its tiles need
+  // signed CloudFront cookies, which an <img> cannot carry -- but the proxy
+  // already holds them, and hands back plain image bytes at a plain URL. So
+  // from here TDR looks like any other park.
+  //
+  // Two things to know. The proxy answers 204 with an empty body both for a
+  // tile that is not there and for an upstream refusal, so the two are
+  // indistinguishable -- which is what the audit at the end of every zoom is
+  // for. And every probe spends one request of the Worker's daily quota,
+  // shared with live viewer traffic, so a both-modes sweep is not free.
+  const TDR_PROXY =
+    "https://wdw-magic-explorer-api.gullet-erase2v.workers.dev/tdr-tiles/z{z}/{x}_{y}.jpg?mode={code}";
+  const TDR_BOUNDS = {
+    "15": { minX: 29115, maxX: 29125, minY: 12905, maxY: 12915 },
+    "16": { minX: 58230, maxX: 58250, minY: 25810, maxY: 25830 },
+    "17": { minX: 116460, maxX: 116500, minY: 51620, maxY: 51660 },
+    "18": { minX: 232920, maxX: 233000, minY: 103240, maxY: 103320 },
+    "19": { minX: 465840, maxX: 466000, minY: 206480, maxY: 206640 },
+    "20": { minX: 931680, maxX: 932000, minY: 412960, maxY: 413280 },
+  };
+  for (const mode of ["daytime", "nighttime"]) {
+    PARKS.push({
+      id: `tdr-${mode}`,
+      label: `Tokyo Disney Resort (${mode})`,
+      template: TDR_PROXY,
+      code: mode,
+      codeLabel: mode,
+      scheme: "xyz",
+      note:
+        "Routed through your own Worker, so no credentials are needed here — the "
+        + "version box carries the mode, not a version code. The proxy returns 204 "
+        + "for a missing tile and for an upstream refusal alike, so a stale-cookie "
+        + "run would look like an empty map; the audit after each zoom is what "
+        + "catches that. Every probe costs one Worker request.",
+      bounds: TDR_BOUNDS,
+    });
+  }
+
+  const CUSTOM = { id: "custom", label: "Custom", scheme: "xyz", note: "" };
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let stopped = false, requests = 0, capped = false, running = false;
+  let park = PARKS[0];
+
+  // Clockwise from north-west. Order matters: the tracer rotates through this
+  // ring, so a different order walks the border the other way round.
+  const RING = [[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0]];
+
+  // -- progress -----------------------------------------------------------
+
+  const state = { park: "", z: 0, zoomIndex: 0, zoomCount: 0, mapIndex: 0, mapCount: 0,
+                  started: 0, planned: 0, done: 0 };
+  //: Requests across the whole run, as opposed to `requests` for this zoom.
+  //  Measuring the rate actually achieved is the only way to say anything
+  //  truthful about when a run will finish -- what was asked for is a ceiling,
+  //  and against a slow CDN it is not the binding one.
+  let totalRequests = 0;
+
+  function duration(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), h = Math.floor(m / 60);
+    return h ? `${h}h ${String(m % 60).padStart(2, "0")}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  }
+
+  function tick(suffix) {
+    if (!running && !suffix) return;
+    const parts = [];
+    if (state.mapCount > 1) parts.push(`map ${state.mapIndex}/${state.mapCount}`);
+    if (state.park) parts.push(state.park);
+    if (state.zoomCount) parts.push(`z${state.z} (${state.zoomIndex}/${state.zoomCount})`);
+    parts.push(`${requests.toLocaleString()} requests`);
+    if (state.started) {
+      const secs = (Date.now() - state.started) / 1000;
+      parts.push(`${duration(secs * 1000)} elapsed`);
+      if (secs > 5 && totalRequests > 20) {
+        const rate = totalRequests / secs;
+        parts.push(`${rate.toFixed(1)}/s`);
+        // Estimated from the rate being achieved, not the rate requested.
+        const left = state.planned - state.done - requests;
+        if (left > 0) parts.push(`~${duration(left / rate * 1000)} left`);
+      }
+    }
+    if (suffix) parts.push(suffix);
+    $("status").textContent = parts.join(" · ");
+  }
+
+  // -- probing ------------------------------------------------------------
+
+  // Two independent ceilings. `rps` spaces out when requests *start*; `conc`
+  // caps how many may be outstanding at once. Which one binds depends on the
+  // CDN: at ~0.7s round trips a single-file walk manages 1.4/s however
+  // generous the rate limit, because it is latency, not permission, that is
+  // in the way.
+  const width = () => Math.max(1, Math.min(64, +$("conc").value || 1));
+
+  let nextSlot = 0;
+  async function gate() {
+    const gap = 1000 / Math.max(1, +$("rps").value || 12);
+    const wait = Math.max(0, nextSlot - performance.now());
+    nextSlot = performance.now() + wait + gap;
+    if (wait > 0) await sleep(wait);
+  }
+
+  let inFlight = 0;
+  const queue = [];
+  async function acquireSlot() {
+    while (inFlight >= width()) await new Promise((r) => queue.push(r));
+    inFlight++;
+  }
+  function releaseSlot() {
+    inFlight--;
+    const next = queue.shift();
+    if (next) next();
+  }
+
+  // Run `jobs` with at most `width()` in flight, and hand back the results in
+  // the order asked for. Callers depend on that order: the walk takes the
+  // first filled neighbour going round the ring, and "first" has to keep
+  // meaning first however the responses happen to land.
+  const inOrder = (jobs) => Promise.all(jobs.map((job) => job()));
+
+  // An <img> that fails to load looks exactly like a tile that is not there,
+  // so a dropped connection would otherwise be recorded as "no imagery" for
+  // every remaining tile. Waiting is the only honest response.
+  async function waitForNetwork() {
+    if (navigator.onLine !== false) return;
+    while (navigator.onLine === false && !stopped) {
+      tick("offline — waiting for the network");
+      await sleep(5000);
+    }
+    nextSlot = performance.now();
+  }
+
+  function url(z, x, y) {
+    return $("tpl").value
+      .replaceAll("{code}", $("code").value.trim())
+      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  function probeRaw(u) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true; clearTimeout(t);
+        img.onload = img.onerror = null; img.src = "";
+        resolve(v);
+      };
+      const t = setTimeout(() => done(false), 15000);
+      img.onload = () => done(img.naturalWidth > 0);
+      img.onerror = () => done(false);
+      img.src = u;
+    });
+  }
+
+  // Every lookup goes through this cache. The tracer asks about the same tile
+  // repeatedly -- each step inspects up to eight neighbours, most of which the
+  // previous step already inspected -- so without it the walk would cost
+  // several times what it should.
+  let cache = new Map(), pending = new Map(), limits = null, zoom = 0;
+
+  async function fetchTile(x, y) {
+    await waitForNetwork();
+    if (stopped) return false;
+    await gate();
+    await acquireSlot();
+    requests++; totalRequests++;
+    try {
+      return await probeRaw(url(zoom, x, y));
+    } finally {
+      releaseSlot();
+    }
+  }
+
+  async function exists(x, y) {
+    if (limits && (x < limits.minX || x > limits.maxX || y < limits.minY || y > limits.maxY)) {
+      return false;  // Outside the search window: treat as empty, do not ask.
+    }
+    const key = x + "," + y;
+    if (cache.has(key)) return cache.get(key);
+    // Concurrency makes overlapping asks for the same tile routine rather than
+    // rare -- the ring a step ahead shares most of its neighbours with this
+    // one. Without joining the request already out, the cache would stop
+    // paying for itself exactly when it matters most.
+    if (pending.has(key)) return pending.get(key);
+    if (capped || stopped) return false;
+    if (requests + pending.size >= Math.max(200, +$("maxreq").value || 12000)) {
+      capped = true;
+      return false;
+    }
+    const probe = fetchTile(x, y).then((got) => {
+      pending.delete(key);
+      cache.set(key, got);
+      paint(x, y, got ? "#22c55e" : "#dc2626");
+      if (requests % 15 === 0) tick();
+      return got;
+    });
+    pending.set(key, probe);
+    return probe;
+  }
+
+  // -- canvas -------------------------------------------------------------
+
+  let view = null;
+  function setupCanvas(b) {
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    const cell = Math.max(1, Math.min(12, Math.floor(900 / w)));
+    canvas.width = w * cell; canvas.height = h * cell;
+    ctx.fillStyle = "#6b7280"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    view = { cell, b };
+    // TMS rows count up from the south, so the low-Y edge is the bottom of the
+    // map rather than the top. The canvas is drawn in raw tile order either
+    // way; only the caption changes.
+    const north = park.scheme === "tms" ? "bottom" : "top";
+    $("orient").textContent = `${w} × ${h} tiles · north at ${north}, west at left`;
+  }
+  function paint(x, y, colour) {
+    if (!view) return;
+    const cx = (x - view.b.minX) * view.cell, cy = (y - view.b.minY) * view.cell;
+    if (cx < 0 || cy < 0 || cx >= canvas.width || cy >= canvas.height) return;
+    ctx.fillStyle = colour;
+    ctx.fillRect(cx, cy, view.cell, view.cell);
+  }
+
+  // -- the walk -----------------------------------------------------------
+
+  const ringIndex = (px, py, qx, qy) =>
+    RING.findIndex(([dx, dy]) => px + dx === qx && py + dy === qy);
+
+  // Moore-neighbour tracing. From a tile known to be on the border, rotate
+  // around it starting from the empty tile we arrived from, take the first
+  // filled neighbour, and repeat. Jacob's criterion stops it: the same
+  // (tile, arrived-from) pair means the loop has closed.
+  // Which way round a closed contour was walked, by the shoelace formula.
+  //
+  // With this ring order an outer boundary comes out positive and the rim of a
+  // hole comes out negative, and that distinction is worth having for free.
+  // Walking west from a seed stops at the first empty tile, which is the map's
+  // west edge if the seed can see it -- but if a hole lies between them it stops
+  // at the hole instead, and the walk then faithfully traces the hole's rim and
+  // reports a fragment as the whole map. That is how a 522-tile donut comes back
+  // as 106 tiles, tidily, with nothing obviously wrong.
+  function windingArea(contour) {
+    let area = 0;
+    for (let i = 0; i < contour.length; i++) {
+      const [x1, y1] = contour[i];
+      const [x2, y2] = contour[(i + 1) % contour.length];
+      area += x1 * y2 - x2 * y1;
+    }
+    return area / 2;
+  }
+
+  async function traceFrom(seedX, seedY) {
+    let sx = seedX, sy = seedY;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      sx = await westEdge(sx, sy);
+      const walked = await moore(sx, sy);
+      // Positive: we found the outside of something. Done.
+      if (stopped || capped || windingArea(walked.contour) >= 0) return walked;
+      // Negative: that was the inside of a hole, so the map carries on west of
+      // it. Step across the gap and look for the real edge from there.
+      const beyond = await crossGap(sx - 1, sy);
+      if (beyond === null) return walked;
+      sx = beyond;
+    }
+    return await moore(await westEdge(sx, sy), sy);
+  }
+
+  //: The first tile west of an empty run, or null if the run reaches the window.
+  async function crossGap(x, y) {
+    while (x > limits.minX) {
+      const span = Math.min(width(), 16);
+      const xs = [];
+      for (let i = 0; i < span; i++) xs.push(x - i);
+      const got = await inOrder(xs.map((cx) => () => exists(cx, y)));
+      const hit = got.indexOf(true);
+      if (hit !== -1) return xs[hit];
+      if (stopped || capped) return null;
+      x -= span;
+    }
+    return null;
+  }
+
+  async function westEdge(seedX, seedY) {
+    // Walk west until the next tile west is empty -- that is a border tile,
+    // and starting anywhere else risks tracing off in the wrong direction.
+    // Asked a run at a time rather than a hop at a time; the tiles past the
+    // edge cost one batch and land in the cache the walk is about to use.
+    let sx = seedX, sy = seedY;
+    for (;;) {
+      // Ask about the immediate neighbour on its own first. A seed landing on
+      // or near the west edge is the common case -- the lattice scans west to
+      // east -- and firing a whole batch westward to discover that costs a
+      // dozen probes into empty space for every region traced. That is the
+      // line of red running off the left of the picture.
+      if (!(await exists(sx - 1, sy))) break;
+      sx -= 1;
+      if (stopped || capped) break;
+      const span = Math.min(width(), 16);
+      const xs = [];
+      for (let i = 1; i <= span; i++) xs.push(sx - i);
+      const got = await inOrder(xs.map((x) => () => exists(x, sy)));
+      const gap = got.indexOf(false);
+      sx -= gap === -1 ? span : gap;
+      if (gap !== -1 || stopped || capped) break;
+    }
+    return sx;
+  }
+
+  async function moore(sx, sy) {
+    let bx = sx - 1, by = sy;
+
+    const contour = [[sx, sy]];
+    const filled = new Set([sx + "," + sy]);
+    const states = new Set();
+    let px = sx, py = sy;
+
+    for (let step = 0; step < 200000; step++) {
+      if (stopped || capped) break;
+      const state = `${px},${py},${bx},${by}`;
+      if (states.has(state)) break;
+      states.add(state);
+
+      const start = ringIndex(px, py, bx, by);
+      // Ask about the next few neighbours together instead of waiting out a
+      // round trip before asking about the one after. The answer is still the
+      // first filled tile in ring order -- speculation changes what is asked,
+      // never what is chosen -- and the extra asks are rarely wasted, because
+      // consecutive border tiles share most of their ring. At width 1 this is
+      // the strictly sequential walk it replaces.
+      const look = Math.min(8, width());
+      const ring = [];
+      for (let k = 1; k <= 8; k++) {
+        const j = (start + k) % 8;
+        ring.push([j, px + RING[j][0], py + RING[j][1]]);
+      }
+
+      let moved = false;
+      for (let base = 0; base < 8 && !moved; base += look) {
+        const slice = ring.slice(base, base + look);
+        const got = await inOrder(slice.map(([, cx, cy]) => () => exists(cx, cy)));
+        const hit = got.indexOf(true);
+        if (hit === -1) continue;
+        const [j, cx, cy] = slice[hit];
+        const prev = (j + 7) % 8;
+        bx = px + RING[prev][0]; by = py + RING[prev][1];
+        px = cx; py = cy;
+        contour.push([px, py]);
+        filled.add(px + "," + py);
+        moved = true;
+      }
+      if (!moved) break;  // A single isolated tile.
+    }
+    for (const [x, y] of contour) paint(x, y, "#2563eb");
+    return { contour, filled };
+  }
+
+  // Everything the border encloses is taken to be imagery. That is the whole
+  // bargain of tracing: the walk establishes where the edge is for the price of
+  // the perimeter, and probing the inside to confirm what the edge already
+  // implies would cost the area instead -- which is the cost tracing exists to
+  // avoid.
+  //
+  // Done by flooding inward from outside the box rather than by taking the
+  // min and max x on each row. On an L, a C or a bitten corner those are not
+  // the same answer: min/max would bridge the concavity and claim tiles that
+  // are not there. An 8-connected contour is watertight against a 4-connected
+  // flood, so whatever the flood cannot reach is genuinely enclosed.
+  function fillRegion(filled, box) {
+    const w = box.maxX - box.minX + 1, h = box.maxY - box.minY + 1;
+    const W = w + 2, H = h + 2;          // one cell of padding to flood from
+    const border = new Uint8Array(W * H);
+    for (const key of filled) {
+      const [x, y] = key.split(",").map(Number);
+      border[(y - box.minY + 1) * W + (x - box.minX + 1)] = 1;
+    }
+
+    const outside = new Uint8Array(W * H);
+    const stack = [0];
+    outside[0] = 1;
+    while (stack.length) {
+      const i = stack.pop();
+      const cx = i % W, cy = (i / W) | 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const j = ny * W + nx;
+        if (outside[j] || border[j]) continue;
+        outside[j] = 1;
+        stack.push(j);
+      }
+    }
+
+    // Runs of enclosed tiles, row by row: [y, xFrom, xTo] inclusive. A row can
+    // contribute several, which is the point of flooding rather than spanning.
+    const spans = [];
+    let count = 0;
+    for (let y = 0; y < h; y++) {
+      let run = -1;
+      for (let x = 0; x <= w; x++) {
+        const held = x < w && !outside[(y + 1) * W + (x + 1)];
+        if (held && run === -1) run = x;
+        if (!held && run !== -1) {
+          spans.push([box.minY + y, box.minX + run, box.minX + x - 1]);
+          count += x - run;
+          run = -1;
+        }
+      }
+    }
+    return { spans, count };
+  }
+
+  // Interior first, then the contour back over the top of it -- the spans
+  // include the border tiles, and the border is the part worth seeing.
+  // Regions can enclose the same ground twice. A shape with a hole in it gets
+  // walked from both sides -- the outer rim, and the rim of the hole, whichever
+  // a seed lands next to first -- and adding up what each encloses counts the
+  // overlap twice. The union is the only figure that means anything: it is the
+  // set of tiles an archive of this zoom would hold.
+  function mergeSpans(lists) {
+    const byRow = new Map();
+    for (const list of lists) {
+      for (const [y, x0, x1] of list) {
+        if (!byRow.has(y)) byRow.set(y, []);
+        byRow.get(y).push([x0, x1]);
+      }
+    }
+    const spans = [];
+    let count = 0;
+    for (const y of [...byRow.keys()].sort((a, b) => a - b)) {
+      const runs = byRow.get(y).sort((a, b) => a[0] - b[0]);
+      let [from, to] = runs[0];
+      for (let i = 1; i < runs.length; i++) {
+        const [a, b] = runs[i];
+        if (a <= to + 1) {
+          to = Math.max(to, b);         // touching or overlapping: one run
+        } else {
+          spans.push([y, from, to]); count += to - from + 1;
+          [from, to] = [a, b];
+        }
+      }
+      spans.push([y, from, to]); count += to - from + 1;
+    }
+    return { spans, count };
+  }
+
+  //: Regions whose box sits wholly inside another's. Either the rim of a hole
+  //  or an island in one -- the border alone cannot tell which, and telling
+  //  them apart means probing the inside, which is what tracing avoids. Worth
+  //  saying out loud, because the fill claims the ground either way.
+  function nestedCount(regions) {
+    return regions.filter((g, i) => regions.some((h, j) =>
+      i !== j && g.box.minX >= h.box.minX && g.box.maxX <= h.box.maxX
+              && g.box.minY >= h.box.minY && g.box.maxY <= h.box.maxY)).length;
+  }
+
+  function paintFill(spans, contour) {
+    for (const [y, x0, x1] of spans) {
+      for (let x = x0; x <= x1; x++) paint(x, y, "#15803d");
+    }
+    for (const [x, y] of contour) paint(x, y, "#2563eb");
+  }
+
+  function boxOf(points) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [x, y] of points) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
+  // A solid rectangle's outer border is exactly the perimeter of its own
+  // bounding box. So: does every tile walked sit on that perimeter, and are
+  // there as many distinct ones as the perimeter has? Both must hold.
+  function isRectangle(filled, box) {
+    const w = box.maxX - box.minX + 1, h = box.maxY - box.minY + 1;
+    const expected = w === 1 || h === 1 ? w * h : 2 * w + 2 * h - 4;
+    let off = 0;
+    for (const key of filled) {
+      const [x, y] = key.split(",").map(Number);
+      const onEdge = x === box.minX || x === box.maxX || y === box.minY || y === box.maxY;
+      if (!onEdge) off++;
+    }
+    return { rectangle: off === 0 && filled.size === expected, off, expected, got: filled.size };
+  }
+
+  // -- per zoom -----------------------------------------------------------
+
+  // Look for a filled tile that no walk so far has accounted for, on a lattice
+  // that gets finer each pass. Cached results make re-treading free, so the
+  // later passes only pay for ground not already covered.
+  //
+  // This has to probe rather than sift what is already cached: a region the
+  // walks never went near has no cached tiles at all, and consulting the cache
+  // alone would report one region for a map that has several.
+  // Budgeted by point count rather than by a fixed divisor. Dividing the box
+  // into 32ths sounds coarse but collapses to every single tile once the box
+  // is small, turning "check nothing else is out there" into a full sweep.
+  const inside = (box, x, y) =>
+    x >= box.minX && x <= box.maxX && y >= box.minY && y <= box.maxY;
+
+  async function findSeed(b, claimed, done, budget) {
+    const spentAt = requests;
+    const overspent = () => budget != null && requests - spentAt >= budget;
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    for (const target of [9, 49, 225, 900]) {
+      const side = Math.sqrt(target);
+      const stepX = Math.max(1, Math.ceil(w / side));
+      const stepY = Math.max(1, Math.ceil(h / side));
+      // The lattice has no order dependency at all -- nothing about one point
+      // decides whether the next is worth asking -- so it goes out in batches
+      // and still yields the first hit in lattice order.
+      let batch = [];
+      const drain = async () => {
+        if (!batch.length) return null;
+        const slice = batch;
+        batch = [];
+        const got = await inOrder(slice.map(([x, y]) => () => exists(x, y)));
+        const hit = got.indexOf(true);
+        return hit === -1 ? null : slice[hit];
+      };
+      for (let y = b.minY; y <= b.maxY; y += stepY) {
+        for (let x = b.minX; x <= b.maxX; x += stepX) {
+          if (stopped || capped || overspent()) return null;
+          if (claimed.has(x + "," + y)) continue;
+          // Skip ground already walked, without paying to re-probe it. This is
+          // why the sweep is affordable: after one region is traced its whole
+          // footprint drops out of the search.
+          //
+          // The cost is that a region sitting entirely inside another's
+          // bounding box -- an island in a lake -- goes unreported. Holes are
+          // not what this is checking for, and finding them means scanning the
+          // interior, which is the thing being avoided.
+          if (done.some((box) => inside(box, x, y))) continue;
+          batch.push([x, y]);
+          if (batch.length >= width()) {
+            const found = await drain();
+            if (found) return found;
+          }
+        }
+      }
+      const found = await drain();
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // A tile that is absent and a tile the CDN refused to serve look exactly the
+  // same to an <img>: both fire onerror. So a burst of throttling mid-walk does
+  // not look like trouble, it looks like the map ending -- and the walk turns
+  // and closes a small tidy loop around whatever it had reached. That is
+  // precisely the failure this project already fixed in the downloader, where
+  // a 403 was being recorded as a permanently missing tile.
+  //
+  // Guessing from the shape cannot separate the two: a genuinely small region
+  // and a truncated walk produce the same border. So do not guess -- ask
+  // again. Re-request the tiles the border rests on, the ones called absent
+  // right beside ones called present. If the map really ends there they are
+  // still absent and this costs a few dozen requests. If any of them answers,
+  // the border is drawn around a refusal and the measurement is void.
+  // Spread a sample across the whole list rather than taking the first few:
+  // throttling arrives in bursts, so corrupted verdicts sit together and a
+  // clustered sample could miss the burst or land wholly inside it.
+  function spread(all, want) {
+    const n = Math.min(all.length, want);
+    if (!n) return [];
+    const step = all.length / n;
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(all[Math.floor(i * step)]);
+    return out;
+  }
+
+  async function verifyBorder(regions) {
+    // Absences the border rests on: called empty, right beside something
+    // called present.
+    const suspects = new Map();
+    for (const region of regions) {
+      for (const key of region.filled) {
+        const [x, y] = key.split(",").map(Number);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy, k = nx + "," + ny;
+          if (cache.get(k) === false) suspects.set(k, [nx, ny]);
+        }
+      }
+    }
+    // With no border there is nothing to lean on, so fall back to whatever the
+    // seed sweep called empty -- which is the whole of an empty zoom.
+    if (!suspects.size) {
+      for (const [k, v] of cache) if (v === false) suspects.set(k, k.split(",").map(Number));
+    }
+
+    // Tiles already seen to answer. These are the control: if one of them has
+    // stopped answering, the server is refusing *now*, and in that state the
+    // absences prove nothing -- so a still-running throttle is caught even
+    // though re-asking about an absence would just be refused again.
+    const known = [];
+    for (const region of regions) {
+      for (const key of region.filled) known.push(key.split(",").map(Number));
+    }
+
+    const probes = spread([...suspects.values()], 24);
+    const controls = spread(known, 12);
+    const [answered, alive] = await Promise.all([
+      inOrder(probes.map(([x, y]) => () => recheck(x, y))),
+      inOrder(controls.map(([x, y]) => () => fetchTile(x, y))),
+    ]);
+    return {
+      flipped: probes.filter((_, i) => answered[i]),
+      dead: controls.filter((_, i) => !alive[i]),
+    };
+  }
+
+  //: Ask about one tile again, ignoring what the cache was told last time.
+  async function recheck(x, y) {
+    if (stopped) return false;
+    const got = await fetchTile(x, y);
+    if (got) {
+      cache.set(x + "," + y, true);
+      paint(x, y, "#f59e0b");
+    }
+    return got;
+  }
+
+  // Which sides of the search window a traced region is pressed up against.
+  // A border that reaches the window has not been measured -- it has been cut
+  // off -- and the straight line it leaves behind is the window's edge, not the
+  // map's. Reporting on the shape of that would be reporting on the window.
+  function clippedEdges(box) {
+    const edges = [];
+    if (box.minX <= limits.minX) edges.push("minX");
+    if (box.maxX >= limits.maxX) edges.push("maxX");
+    if (box.minY <= limits.minY) edges.push("minY");
+    if (box.maxY >= limits.maxY) edges.push("maxY");
+    return edges;
+  }
+
+  async function runZoom(z, declared, marginOverride) {
+    zoom = z;
+    requests = 0; capped = false; cache = new Map(); pending = new Map();
+    // Allow the walk a margin outside the declared box, so a border that runs
+    // beyond it is visible rather than silently clipped.
+    const margin = marginOverride != null
+      ? marginOverride
+      : Math.max(0, +$("margin").value || 0);
+    limits = {
+      minX: declared.minX - margin, maxX: declared.maxX + margin,
+      minY: declared.minY - margin, maxY: declared.maxY + margin,
+    };
+    setupCanvas(limits);
+
+    const regions = [];
+    const claimed = new Set();
+    const seen = new Set();
+    //: Bounding boxes of walks already done, so the seed search skips them.
+    const walked = [];
+    const maxParts = Math.max(1, +$("parts").value || 6);
+
+    // Two separate limits: how many distinct regions to report, and how many
+    // seeds to try. A seed landing inside a region already walked re-walks it
+    // for free -- every tile is cached by then -- so the duplicate check below
+    // costs nothing but still needs a budget to run in.
+    // Finding the map at all is worth any number of probes -- without a seed
+    // there is nothing to report. Hunting for a *second* region is not, and by
+    // default it no longer happens: the walk closes, the zoom is done, on to
+    // the next.
+    //
+    // Defaulting it off rather than merely cheap, because a budget did not
+    // actually solve this. On a small declared box the whole sweep fits inside
+    // any sane budget, so the limit never binds and every zoom still pays to
+    // fill its box with red. Off is the only setting that reliably stops.
+    //
+    // What it costs: a piece of map detached from the main body goes
+    // unreported. Set a budget above zero where that is a real possibility.
+    // Across all five public maps, every zoom of every one came back as a
+    // single region -- and the sweep was never a guarantee anyway, since a
+    // region smaller than the finest lattice could always slip through it.
+    const extra = Math.max(0, +$("extra").value || 0);
+
+    for (let attempt = 0; attempt < maxParts * 50 && regions.length < maxParts; attempt++) {
+      if (stopped || capped) break;
+      const budget = regions.length === 0 ? null : extra;
+      if (budget === 0) break;
+      const seed = await findSeed(declared, claimed, walked, budget);
+      if (!seed) break;
+      claimed.add(seed.join(","));
+
+      const { contour, filled } = await traceFrom(seed[0], seed[1]);
+      if (!contour.length) continue;
+      for (const k of filled) claimed.add(k);
+
+      const box = boxOf(contour);
+      walked.push(box);
+
+      // A seed elsewhere in the same region produces the same walk. Recognise
+      // it rather than reporting one region several times.
+      const key = `${box.minX},${box.maxX},${box.minY},${box.maxY},${filled.size}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const fill = fillRegion(filled, box);
+      paintFill(fill.spans, contour);
+      regions.push({
+        contour, filled, box,
+        clipped: clippedEdges(box),
+        spans: fill.spans,
+        covered: fill.count,
+        ...isRectangle(filled, box),
+      });
+    }
+
+    // Before believing any of it, tell refusals apart from absences.
+    const audit = capped || stopped ? { flipped: [], dead: [] } : await verifyBorder(regions);
+
+    return { z, declared, regions, requests, capped, margin,
+             suspect: audit.flipped, dead: audit.dead, interrupted: stopped };
+  }
+
+  function describe(r) {
+    // Ahead of everything else, including "no imagery": if tiles the walk
+    // called absent answer on a second ask, nothing downstream of that verdict
+    // can be trusted, least of all a tidy-looking one.
+    if (r.suspect && r.suspect.length) {
+      const [x, y] = r.suspect[0];
+      return {
+        text: `unreliable — ${r.suspect.length} tile(s) the walk recorded as absent `
+            + `answered when asked again (e.g. ${x},${y}). The server was refusing `
+            + `requests, which is indistinguishable from empty here, so this border `
+            + `is drawn around a refusal. Re-run slower or with fewer in flight`,
+        cls: "bad",
+      };
+    }
+    if (r.dead && r.dead.length) {
+      const [x, y] = r.dead[0];
+      return {
+        text: `unreliable — the server stopped answering for ${r.dead.length} tile(s) `
+            + `it had already served (e.g. ${x},${y}), so it is refusing requests right `
+            + `now. While that is true an absent tile cannot be told from a refused one, `
+            + `and every edge here rests on one. Re-run slower or with fewer in flight`,
+        cls: "bad",
+      };
+    }
+    if (!r.regions.length) return { text: "no imagery found", cls: "muted" };
+
+    // Say this first and say nothing else. A clipped walk cannot be called a
+    // rectangle or not one, and the traced box is a lower bound rather than a
+    // measurement -- treating it as either is how a truncated run gets filed
+    // as a finished one.
+    const cut = [...new Set(r.regions.flatMap((g) => g.clipped))];
+    if (cut.length) {
+      return {
+        text: `reached the ${cut.join(" and ")} edge of the search window — `
+            + `imagery runs past it, so this box is a floor, not a measurement; `
+            + `re-run with a margin above ${r.margin}`,
+        cls: "bad",
+      };
+    }
+
+    const parts = [];
+    const nested = nestedCount(r.regions);
+    if (r.regions.length > 1) {
+      parts.push(nested
+        ? `${r.regions.length} borders, ${nested} inside another — a hole or an island, `
+          + `and the fill claims it either way`
+        : `${r.regions.length} separate regions`);
+    }
+    const bad = r.regions.filter((g) => !g.rectangle);
+    if (!bad.length) {
+      parts.push(r.regions.length > 1 ? "each a rectangle" : "a rectangle");
+    } else {
+      const g = bad[0];
+      parts.push(
+        g.off > 0
+          ? `not a rectangle — ${g.off} border tile(s) inside the box edge`
+          : `not a rectangle — border is ${g.got} tiles, a rectangle would be ${g.expected}`
+      );
+    }
+    if (r.capped) parts.push("hit the request cap");
+    // An irregular footprint is a finding, not a fault -- the walk went all
+    // the way round and this is what was there. Only the cap means the answer
+    // is unfinished, so only the cap reads as an error.
+    return {
+      text: parts.join(", "),
+      cls: r.capped ? "bad" : (bad.length || r.regions.length > 1 ? "warn" : "ok"),
+    };
+  }
+
+  // -- results ------------------------------------------------------------
+
+  // Kept in the browser so an overnight run survives a refresh, a crash, or a
+  // laptop lid. Rows are plain data; the table is rebuilt from them on load.
+  const STORE = "tilearc.border-trace.rows.v1";
+  let rows = [];
+
+  function loadRows() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORE));
+      return Array.isArray(raw) ? migrate(raw) : [];
+    } catch (e) { return []; }
+  }
+
+  // Rows saved by older versions of this page are still good measurements;
+  // they just predate fields that were added later. Bring them forward rather
+  // than making someone re-run a night's work to get a column.
+  function migrate(raw) {
+    // Newest answer per map and zoom. Duplicates could be written before
+    // `putRow`, and a stale one left in place is worse than no row at all.
+    const best = new Map();
+    for (const row of raw) {
+      const key = `${row.parkId || row.map}|${row.z}`;
+      const held = best.get(key);
+      if (!held || String(row.at || "") > String(held.at || "")) best.set(key, row);
+    }
+
+    return [...best.values()].map((row) => {
+      const out = { ...row };
+      if (!out.parkId) {
+        const park = PARKS.find((p) => p.label === out.map);
+        if (park) out.parkId = park.id;
+      }
+      // `covered` arrived with the fill. For a row that traced to one clean
+      // rectangle it is exactly the box, so it can be recovered for free.
+      // Anything else genuinely is not known, and is left open to re-check
+      // rather than filled in with a guess.
+      // Completeness, not tidiness: an irregular footprint or an empty zoom is
+      // a finished measurement, and older rows recorded them as unsettled.
+      if (out.clean === undefined || out.clean === false) {
+        out.clean = !/search window|request cap|^unreliable/.test(out.text || "");
+      }
+      if (!out.covered && out.traced && out.traced !== "—" && out.text === "a rectangle") {
+        const [xs, ys] = out.traced.split(", ");
+        const [minX, maxX] = xs.split("-").map(Number);
+        const [minY, maxY] = ys.split("-").map(Number);
+        if ([minX, maxX, minY, maxY].every(Number.isFinite)) {
+          out.covered = (maxX - minX + 1) * (maxY - minY + 1);
+          out.clean = true;
+        }
+      }
+      return out;
+    });
+  }
+  function saveRows() {
+    try { localStorage.setItem(STORE, JSON.stringify(rows)); } catch (e) { /* quota, private mode */ }
+  }
+
+  const boxText = (b) => b ? `${b.minX}-${b.maxX}, ${b.minY}-${b.maxY}` : "—";
+
+  function renderRow(row) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${row.map}</td><td>${row.z}</td><td>${row.requests.toLocaleString()}</td>` +
+      `<td>${row.regions}</td><td>${row.border.toLocaleString()}</td>` +
+      `<td>${(row.covered || 0).toLocaleString()}</td>` +
+      `<td class="mono">${row.declared}</td><td class="mono">${row.traced}</td>` +
+      `<td class="${row.cls}">${row.text}</td>`;
+    $("results").tBodies[0].appendChild(tr);
+  }
+
+  function redrawRows() {
+    $("results").tBodies[0].innerHTML = "";
+    for (const row of rows) renderRow(row);
+  }
+
+  function buildRow(parkId, mapLabel, r) {
+    const { text, cls } = describe(r);
+    const all = r.regions.flatMap((g) => g.contour);
+    const merged = mergeSpans(r.regions.map((g) => g.spans));
+    const plain = r.regions.every((g) => g.rectangle && !g.clipped.length);
+    return {
+      parkId,
+      map: mapLabel,
+      z: r.z,
+      requests: r.requests,
+      regions: r.regions.length,
+      border: r.regions.reduce((n, g) => n + g.filled.size, 0),
+      //: Tiles the traced border encloses -- what an archive of this zoom
+      //  actually contains, as against the box that merely bounds it.
+      covered: merged.count,
+      declared: boxText(r.declared),
+      traced: boxText(all.length ? boxOf(all) : null),
+      // Only worth keeping where the box does not already say it. A single
+      // rectangle is fully described by its corners and the runs are bulk.
+      spans: plain && r.regions.length <= 1 ? null : merged.spans,
+      clean: isCleanResult(r),
+      text, cls,
+      at: new Date().toISOString(),
+    };
+  }
+
+  //: Whether the MEASUREMENT finished -- not whether the answer is tidy.
+  //
+  //  These are different things and conflating them was a mistake. Being a
+  //  rectangle is a property of the map; being complete is a property of the
+  //  walk. An irregular footprint traced all the way round inside its window
+  //  and its budget is a finished measurement that happens to report an
+  //  interesting shape, and sending someone back to re-walk it asks them to
+  //  keep re-confirming a result that was never in doubt. Same for a zoom
+  //  searched and found empty.
+  //
+  //  A measurement is unfinished only when the answer rests on a limit that
+  //  was hit: the request cap, the edge of the search window, a stop, or a
+  //  border whose "missing" tiles turn out to answer after all.
+  function isCleanResult(r) {
+    if (r.capped || r.interrupted) return false;
+    if ((r.suspect && r.suspect.length) || (r.dead && r.dead.length)) return false;
+    return r.regions.every((g) => !g.clipped.length);
+  }
+
+  //: One row per map and zoom, always. A map and a zoom is a question with one
+  //  answer, and keeping two of them means keeping a stale one that looks
+  //  exactly like the fresh one -- and, worse, one that a re-check can never
+  //  clear, because re-measuring writes to the other copy.
+  const sameZoom = (row, parkId, mapLabel, z) =>
+    +row.z === +z && (row.parkId ? row.parkId === parkId : row.map === mapLabel);
+
+  function putRow(parkId, mapLabel, r) {
+    const row = buildRow(parkId, mapLabel, r);
+    const at = rows.findIndex((x) => sameZoom(x, parkId, mapLabel, r.z));
+    if (at === -1) {
+      rows.push(row);
+      renderRow(row);
+    } else {
+      rows[at] = row;
+      redrawRows();
+    }
+    saveRows();
+    refreshResultButtons();
+  }
+  const addRow = putRow, replaceRow = putRow;
+
+  function tsv() {
+    const head = ["map", "zoom", "requests", "regions", "border tiles", "covered tiles",
+                  "declared box", "traced box", "shape", "checked at"];
+    const body = rows.map((r) => [
+      r.map, "z" + r.z, r.requests, r.regions, r.border, r.covered || 0,
+      r.declared, r.traced, r.text, r.at,
+    ].join("\t"));
+    return [head.join("\t")].concat(body).join("\n");
+  }
+
+  // The machine-readable form. A rectangle needs only its box; anything else
+  // carries the runs the border encloses, so a downloader can enumerate an
+  // irregular footprint without having to rediscover its shape.
+  function coverageJson() {
+    const maps = {};
+    for (const r of rows) {
+      const id = r.parkId || (PARKS.find((p) => p.label === r.map) || {}).id || r.map;
+      const box = r.traced === "—" ? null : (() => {
+        const [xs, ys] = r.traced.split(", ");
+        const [minX, maxX] = xs.split("-").map(Number);
+        const [minY, maxY] = ys.split("-").map(Number);
+        return { minX, maxX, minY, maxY };
+      })();
+      (maps[id] = maps[id] || {})[r.z] = {
+        box,
+        tiles: r.covered || 0,
+        rectangle: !!r.clean,
+        verdict: r.text,
+        checkedAt: r.at,
+        ...(r.spans ? { spans: r.spans } : {}),
+      };
+    }
+    return JSON.stringify({
+      tool: "tile-border-trace",
+      generated: new Date().toISOString(),
+      note: "spans are [y, xFrom, xTo] inclusive, in server tile space, merged "
+          + "across regions so they never overlap. Present only where the box "
+          + "alone does not describe the coverage; a single rectangle is fully "
+          + "described by its box. Everything a traced border encloses is taken "
+          + "to be imagery and was not probed.",
+      maps,
+    }, null, 2);
+  }
+
+  function refreshResultButtons() {
+    const empty = rows.length === 0;
+    $("copy").disabled = empty;
+    $("download").disabled = empty;
+    $("downloadJson").disabled = empty;
+    $("clear").disabled = empty;
+    const open = running ? 0 : unresolved().length;
+    $("runUnresolved").disabled = running || open === 0;
+    $("runUnresolved").textContent = open
+      ? `Re-check ${open} unresolved row${open === 1 ? "" : "s"}`
+      : "Re-check unresolved rows";
+  }
+
+  // -- cost estimate ------------------------------------------------------
+
+  // Rough, and meant to be: the walk costs about a couple of probes per border
+  // tile once the neighbour cache is warm, plus the seed search. Good enough to
+  // answer "will this finish by morning?".
+  function estimate(bounds) {
+    const cap = Math.max(200, +$("maxreq").value || 12000);
+    let total = 0;
+    for (const z of Object.keys(bounds)) {
+      const b = bounds[z];
+      const perimeter = 2 * (b.maxX - b.minX + 1) + 2 * (b.maxY - b.minY + 1);
+      total += Math.min(cap, Math.round(perimeter * 2.2) + 80);
+    }
+    return total;
+  }
+
+  //: A middling CDN round trip, in seconds. Only used before a run has
+  //  measured the real one -- the status line switches to observed rate as
+  //  soon as there is enough of a run to divide by.
+  const ASSUMED_LATENCY = 0.7;
+
+  // Whichever ceiling is lower is the one that decides. Quoting the rate limit
+  // alone is how the first overnight run got predicted at an hour and took
+  // seven: at width 1 no rate limit above 1.4/s means anything.
+  function achievable() {
+    const rps = Math.max(1, +$("rps").value || 12);
+    return Math.min(rps, width() / ASSUMED_LATENCY);
+  }
+
+  function updateEstimate() {
+    const rate = achievable();
+    const here = parseBounds();
+    const all = PARKS.reduce((n, p) => n + estimate(p.bounds), 0);
+    const parts = [];
+    if (here) {
+      const mine = estimate(here);
+      parts.push(`This map: roughly ${mine.toLocaleString()} requests, about ${duration(mine / rate * 1000)}.`);
+    }
+    parts.push(
+      `All ${PARKS.length} maps: roughly ${all.toLocaleString()} requests, ` +
+      `about ${duration(all / rate * 1000)}.`
+    );
+    const rps = Math.max(1, +$("rps").value || 12);
+    parts.push(
+      rate < rps - 0.05
+        ? `Held to about ${rate.toFixed(0)}/s by ${width()} in flight at ~${ASSUMED_LATENCY}s per tile, not by the ${rps}/s limit.`
+        : `At the ${rps}/s limit, with ${width()} in flight.`
+    );
+    $("estimate").textContent = parts.join(" ");
+  }
+
+  // -- keeping the machine awake ------------------------------------------
+
+  let wakeLock = null;
+  async function acquireWake() {
+    if (!$("wake").checked || !navigator.wakeLock) return;
+    try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { wakeLock = null; }
+  }
+  function releaseWake() {
+    if (!wakeLock) return;
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+  // The lock is dropped whenever the tab is hidden, and is not handed back
+  // automatically -- so ask again each time the tab comes forward.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && running && !wakeLock) acquireWake();
+  });
+
+  // -- driving ------------------------------------------------------------
+
+  function busy(on) {
+    running = on;
+    $("run").disabled = on; $("runAll").disabled = on; $("runEverything").disabled = on;
+    $("stop").disabled = !on;
+    refreshResultButtons();
+  }
+
+  function parseBounds() {
+    try {
+      const raw = JSON.parse($("bounds").value), out = {};
+      for (const k of Object.keys(raw)) {
+        const z = parseInt(k, 10);
+        if (!Number.isFinite(z)) continue;
+        const b = raw[k];
+        out[z] = { minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY };
+      }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  function formatBounds(bounds) {
+    const lines = Object.keys(bounds).map(Number).sort((a, b) => a - b).map((z) => {
+      const b = bounds[z];
+      return `  "${z}": { "minX": ${b.minX}, "maxX": ${b.maxX}, "minY": ${b.minY}, "maxY": ${b.maxY} }`;
+    });
+    return "{\n" + lines.join(",\n") + "\n}";
+  }
+
+  function applyPark(p) {
+    park = p;
+    $("park").value = p.id;
+    $("tpl").value = p.template;
+    $("code").value = p.code;
+    $("bounds").value = formatBounds(p.bounds);
+    $("parknote").textContent = p.note || `Version ${p.codeLabel} (${p.code}).`;
+    refreshZooms();
+    updateEstimate();
+  }
+
+  async function runSeries(park, zooms, bounds) {
+    state.park = park.label;
+    state.zoomCount = zooms.length;
+    const written = [];
+    for (let i = 0; i < zooms.length; i++) {
+      if (stopped) break;
+      const declared = bounds[zooms[i]];
+      if (!declared) continue;
+      state.z = zooms[i]; state.zoomIndex = i + 1;
+      requests = 0; tick();
+      addRow(park.id, park.label, await runZoom(zooms[i], declared));
+      written.push(zooms[i]);
+      state.done += requests;
+    }
+    if (!stopped) flagIfEntirelyEmpty(park, written);
+  }
+
+  // A zoom that finds nothing has no tile to use as a control, so on its own it
+  // cannot tell "there is no imagery here" from "nothing answered". Usually the
+  // rest of the map settles it: if any zoom returned tiles, the source is up and
+  // an empty zoom is genuinely empty. If *every* zoom came back empty, that is
+  // not a map, that is an outage -- a dead proxy, or credentials that expired.
+  //
+  // The same reasoning as the downloader's everything-is-missing check, and the
+  // same failure it exists to stop: a run that completes tidily, reports no
+  // errors, and records a park as having no tiles in it.
+  function flagIfEntirelyEmpty(park, zooms) {
+    if (zooms.length < 2) return;         // too little to conclude anything from
+    const mine = rows.filter((r) => zooms.some((z) => +r.z === +z)
+      && (r.parkId ? r.parkId === park.id : r.map === park.label));
+    if (mine.length < 2 || mine.some((r) => (r.covered || 0) > 0)) return;
+    for (const row of mine) {
+      row.clean = false;
+      row.cls = "bad";
+      row.text = `every zoom of ${park.label} came back empty — a whole map with no `
+        + `tiles is a source that is not answering, not a map. Check the proxy or `
+        + `the credentials behind it before believing this`;
+    }
+    redrawRows();
+    saveRows();
+    refreshResultButtons();
+  }
+
+  // A clipped walk measured the window, not the map, so the only useful
+  // response is to open the window and ask again. Widening by four each time
+  // gets from 8 to 512 in three goes, which covers everything seen so far
+  // without turning a wrong guess into a long crawl.
+  async function measureWidening(z, declared) {
+    let margin = Math.max(0, +$("margin").value || 0);
+    let result = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      result = await runZoom(z, declared, margin);
+      const clipped = result.regions.some((g) => g.clipped.length);
+      if (!clipped || stopped || capped) return result;
+      margin = Math.max(32, margin * 4);
+      tick(`clipped at margin ${result.margin} — retrying at ${margin}`);
+    }
+    return result;
+  }
+
+  //: The subset of a bounds object covering just the zooms about to be run,
+  //  so the "time left" figure is measured against what was actually asked for.
+  const subset = (bounds, zooms) =>
+    Object.fromEntries(zooms.filter((z) => bounds[z]).map((z) => [z, bounds[z]]));
+
+  // One map, from whatever is currently in the form.
+  async function go(zooms) {
+    const bounds = parseBounds();
+    if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
+    stopped = false; busy(true); await acquireWake();
+    state.mapIndex = 1; state.mapCount = 1; state.started = Date.now();
+    state.planned = estimate(subset(bounds, zooms)); state.done = 0; totalRequests = 0;
+    try {
+      await runSeries(park, zooms, bounds);
+      tick(stopped ? "stopped" : "done");
+    } finally { busy(false); releaseWake(); }
+  }
+
+  //: Rows worth going back to. `clean` is recorded from now on; rows saved
+  //  before it existed are judged from the verdict they carry.
+  // For rows saved before `clean` recorded completeness rather than tidiness,
+  // read it off the verdict: only these three say the walk was stopped short.
+  const settled = (r) => typeof r.clean === "boolean"
+    ? r.clean
+    : !/search window|request cap|^unreliable/.test(r.text);
+
+  function unresolved() {
+    return rows
+      .map((r, i) => ({ r, i, park: PARKS.find((p) => p.id === r.parkId || p.label === r.map) }))
+      .filter((x) => !settled(x.r) && x.park);
+  }
+
+  // Re-measure only what is unsettled. Everything already traced to a clean
+  // rectangle is done -- its box says all there is to say -- so re-walking it
+  // would spend hours confirming what the last run established.
+  async function goUnresolved() {
+    const todo = unresolved();
+    if (!todo.length) {
+      $("status").textContent = "nothing unresolved — every row traced to a rectangle";
+      return;
+    }
+    stopped = false; busy(true); await acquireWake();
+    state.mapCount = 0; state.started = Date.now();
+    state.planned = todo.reduce(
+      (n, x) => n + estimate({ [x.r.z]: x.park.bounds[x.r.z] }), 0);
+    state.done = 0; totalRequests = 0;
+    try {
+      for (let i = 0; i < todo.length; i++) {
+        if (stopped) break;
+        const { r, park } = todo[i];
+        applyPark(park);
+        state.park = park.label; state.z = r.z;
+        state.zoomIndex = i + 1; state.zoomCount = todo.length;
+        requests = 0; tick();
+        replaceRow(park.id, park.label, await measureWidening(+r.z, park.bounds[r.z]));
+        state.done += requests;
+      }
+      tick(stopped ? "stopped" : `done — re-measured ${todo.length} zoom(s)`);
+    } finally { busy(false); releaseWake(); state.zoomCount = 0; }
+  }
+
+  // Every map, every zoom -- the overnight run.
+  async function goEverything() {
+    stopped = false; busy(true); await acquireWake();
+    state.mapCount = PARKS.length; state.started = Date.now();
+    state.planned = PARKS.reduce((n, p) => n + estimate(p.bounds), 0);
+    state.done = 0; totalRequests = 0;
+    try {
+      for (let i = 0; i < PARKS.length; i++) {
+        if (stopped) break;
+        state.mapIndex = i + 1;
+        // Load it into the form as we go: the probe reads the template and the
+        // version code straight from those fields, and it doubles as a display
+        // of what is being checked right now.
+        applyPark(PARKS[i]);
+        const zooms = Object.keys(PARKS[i].bounds).map(Number).sort((a, b) => a - b);
+        await runSeries(PARKS[i], zooms, PARKS[i].bounds);
+      }
+      tick(stopped ? "stopped" : `done — all ${PARKS.length} maps`);
+    } finally { busy(false); releaseWake(); state.mapCount = 0; }
+  }
+
+  function refreshZooms() {
+    const bounds = parseBounds(), sel = $("zoom"), prev = sel.value;
+    sel.innerHTML = "";
+    if (!bounds) return;
+    for (const z of Object.keys(bounds).map(Number).sort((a, b) => a - b)) {
+      const o = document.createElement("option");
+      const b = bounds[z];
+      const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+      o.value = z;
+      o.textContent = `z${z}  (perimeter about ${(2 * w + 2 * h).toLocaleString()} tiles)`;
+      sel.appendChild(o);
+    }
+    // Switching maps changes which zooms exist, so a remembered choice may no
+    // longer be on the list. Fall back to the first rather than leaving the
+    // select on nothing, which would make "Trace this zoom" a no-op.
+    if (prev) sel.value = prev;
+    if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+  }
+
+  // -- wiring -------------------------------------------------------------
+
+  for (const p of PARKS.concat([CUSTOM])) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.id === "custom" ? "Custom (edit the fields below)" : p.label;
+    $("park").appendChild(o);
+  }
+
+  $("park").addEventListener("change", () => {
+    const chosen = PARKS.find((p) => p.id === $("park").value);
+    if (chosen) {
+      applyPark(chosen);
+    } else {
+      // Custom: leave the fields exactly as the user left them.
+      park = CUSTOM;
+      $("parknote").textContent = "Hand-entered source. Y is read as xyz for the caption on the map below.";
+    }
+  });
+
+  $("bounds").addEventListener("input", () => { refreshZooms(); updateEstimate(); });
+  $("rps").addEventListener("input", updateEstimate);
+  $("conc").addEventListener("input", () => {
+    updateEstimate();
+    // Raising the width mid-run should take effect now, not at the next zoom:
+    // wake whatever is queued so the extra slots get used.
+    for (let i = queue.length; i > 0 && inFlight < width(); i--) {
+      const next = queue.shift();
+      if (next) next();
+    }
+  });
+  $("maxreq").addEventListener("input", updateEstimate);
+
+  $("run").addEventListener("click", () => go([+$("zoom").value]));
+  $("runAll").addEventListener("click", () => {
+    const b = parseBounds();
+    if (b) go(Object.keys(b).map(Number).sort((x, y) => x - y));
+  });
+  $("runEverything").addEventListener("click", goEverything);
+  $("runUnresolved").addEventListener("click", goUnresolved);
+  $("stop").addEventListener("click", () => { stopped = true; tick("stopping…"); });
+
+  $("copy").addEventListener("click", () => {
+    const text = tsv();
+    $("summary").hidden = false; $("summary").textContent = text;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+  });
+  function saveAs(text, type, name) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  const stamp = () => new Date().toISOString().slice(0, 10);
+  $("download").addEventListener("click", () =>
+    saveAs(tsv(), "text/tab-separated-values", `tile-border-trace-${stamp()}.tsv`));
+  $("downloadJson").addEventListener("click", () =>
+    saveAs(coverageJson(), "application/json", `tile-coverage-${stamp()}.json`));
+  $("clear").addEventListener("click", () => {
+    rows = [];
+    $("results").tBodies[0].innerHTML = "";
+    $("summary").hidden = true;
+    saveRows();
+    refreshResultButtons();
+  });
+
+  rows = loadRows();
+  redrawRows();
+  refreshResultButtons();
+  // Migration can drop duplicates and fill in columns, so write the tidied
+  // set straight back rather than leaving the old shape on disk.
+  if (rows.length) {
+    saveRows();
+    $("status").textContent = `${rows.length} result(s) restored from the last run.`;
+  }
+  applyPark(PARKS[0]);
+})();
+</script>
+</body>
+</html>

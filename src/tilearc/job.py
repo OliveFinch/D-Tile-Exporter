@@ -31,6 +31,9 @@ class JobRequest:
     state_path: Path | None = None
     options: DownloadOptions = field(default_factory=DownloadOptions)
     restart: bool = False
+    #: Drop recorded "no imagery" verdicts before starting, so they are asked
+    #: for again. Keeps downloaded tiles, unlike ``restart``.
+    retry_missing: bool = False
 
     def resolved_output(self) -> Path:
         return Path(self.output) if self.output else default_output(self.plan, self.fmt)
@@ -96,6 +99,10 @@ async def run_job(
     resumed = state.bind_job(
         plan.fingerprint(), descriptor, allow_restart=request.restart
     )
+    if request.retry_missing:
+        cleared = state.clear_missing()
+        if cleared:
+            log(f"cleared {cleared:,} 'no imagery' records; they will be asked for again")
     if resumed and on_resume is not None:
         on_resume(state.counts())
 

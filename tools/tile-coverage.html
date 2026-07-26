@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tile coverage checker</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #d4d4d8;
+    --panel: #f6f6f7; --ok: #16a34a; --bad: #dc2626; --warn: #b45309;
+    --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --fg: #e8e8ea; --muted: #9ca3af; --line: #34353a;
+      --panel: #202126; --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b;
+      --accent: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  fieldset {
+    border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+    margin: 0 0 16px; background: var(--panel);
+  }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, textarea, select, button {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  }
+  input[type=text], textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  textarea { min-height: 108px; resize: vertical; }
+  button {
+    cursor: pointer; background: var(--accent); color: #fff; border-color: transparent;
+    font-weight: 600; padding: 7px 16px;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.secondary { background: transparent; color: var(--fg); border-color: var(--line); font-weight: 400; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 0 0 auto; }
+  .grow { flex: 1 1 220px !important; }
+  .actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  canvas { border: 1px solid var(--line); border-radius: 6px; image-rendering: pixelated; max-width: 100%; background: var(--panel); }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin: 8px 0 0; flex-wrap: wrap; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; }
+  th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .muted { color: var(--muted); }
+  .note { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  #status, #plan { font-variant-numeric: tabular-nums; }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; overflow-x: auto; font-size: 12px; margin: 10px 0 0;
+  }
+  .modes { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 4px; }
+  .modes label { display: flex; gap: 6px; align-items: baseline; color: var(--fg); font-size: 13px; margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Tile coverage checker</h1>
+<p class="sub">
+  Loads tiles straight from the CDN in your browser to answer two separate
+  questions: <b>where does the imagery stop</b>, and <b>how much of the declared
+  rectangle is actually empty</b>. The first needs a few hundred requests. The
+  second needs a sample, not a full sweep.
+</p>
+
+<fieldset>
+  <legend>Source</legend>
+  <label for="tpl">Tile URL template</label>
+  <input type="text" id="tpl"
+    value="https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod/{code}/{z}/{x}/{y}.jpg">
+  <div class="row">
+    <div class="grow">
+      <label for="code">Version code (replaces <span class="mono">{code}</span>)</label>
+      <input type="text" id="code" value="900014458">
+    </div>
+    <div>
+      <label for="rps">Requests/sec</label>
+      <input type="number" id="rps" value="12" min="1" max="60" style="width:90px">
+    </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>What to run</legend>
+  <div class="modes">
+    <label><input type="radio" name="mode" value="edgesonly" checked> <span><b>Edges only</b> — fastest, nothing inside the box</span></label>
+    <label><input type="radio" name="mode" value="edges"> <span><b>Edges + density</b> — adds a sample of the interior</span></label>
+    <label><input type="radio" name="mode" value="full"> <span><b>Full coverage map</b> — slow, shows the shape</span></label>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="samples">Samples per line</label>
+      <input type="number" id="samples" value="12" min="3" max="40" style="width:100px">
+    </div>
+    <div>
+      <label for="density">Density samples</label>
+      <input type="number" id="density" value="400" min="50" max="3000" style="width:110px">
+    </div>
+    <div>
+      <label for="budget">Full-map budget</label>
+      <input type="number" id="budget" value="2500" min="100" max="40000" style="width:120px">
+    </div>
+  </div>
+  <p class="note">
+    <b>Edges</b> walks in from each declared edge until it finds a line holding at
+    least one tile — the same method <span class="mono">discover</span> uses, run
+    from a browser as an independent check. A line that looks empty is retested
+    four times as finely before it is believed, because evenly-spaced sampling
+    steps straight over thin features and near an edge is where coverage is
+    thinnest. <b>Density</b> is a uniform random sample of the box: 400 samples
+    pins the fill rate to about ±5%, and scanning more changes that answer very
+    little.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Declared bounds</legend>
+  <label for="bounds">boundsByZoom JSON — paste straight from the park config</label>
+  <textarea id="bounds" spellcheck="false">{
+  "11": { "minX": 555, "maxX": 564, "minY": 851, "maxY": 859 },
+  "12": { "minX": 1114, "maxX": 1125, "minY": 1706, "maxY": 1715 },
+  "13": { "minX": 2228, "maxX": 2251, "minY": 3412, "maxY": 3431 },
+  "14": { "minX": 4456, "maxX": 4503, "minY": 6824, "maxY": 6863 },
+  "15": { "minX": 8928, "maxX": 8987, "minY": 13672, "maxY": 13699 },
+  "16": { "minX": 17856, "maxX": 17975, "minY": 27344, "maxY": 27399 },
+  "17": { "minX": 35712, "maxX": 35951, "minY": 54688, "maxY": 54799 },
+  "18": { "minX": 71424, "maxX": 71903, "minY": 109376, "maxY": 109599 },
+  "19": { "minX": 143264, "maxX": 143455, "minY": 218752, "maxY": 219199 },
+  "20": { "minX": 286528, "maxX": 286911, "minY": 437504, "maxY": 438399 }
+}</textarea>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="zoom">Zoom</label>
+      <select id="zoom"></select>
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <span class="note" id="plan"></span>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="scan">Run this zoom</button>
+    <button id="scanAll" class="secondary">Run every zoom</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <span id="status" class="muted"></span>
+  </div>
+</fieldset>
+
+<h2>Coverage map</h2>
+<canvas id="map" width="600" height="240"></canvas>
+<div class="legend">
+  <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
+  <span><span class="sw" style="background:#dc2626"></span>no tile</span>
+  <span><span class="sw" style="background:#6b7280"></span>not checked</span>
+  <span id="orient" class="muted"></span>
+</div>
+
+<h2>Results</h2>
+<div class="scroll">
+  <table id="results">
+    <thead><tr>
+      <th>zoom</th><th>requests</th><th>declared box</th><th>observed box</th>
+      <th>fill</th><th>verdict</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<pre id="summary" hidden></pre>
+<div class="actions">
+  <button id="copy" class="secondary" disabled>Copy results</button>
+</div>
+
+<h2>Spot-check specific tiles</h2>
+<p class="note" style="margin-bottom:8px">
+  Paste tiles the downloader called <span class="mono">missing</span> (one
+  <span class="mono">z/x/y</span> or <span class="mono">z x y</span> per line). If
+  they load here, they were never really absent — which would put the fault in the
+  downloader, not the bounds.
+</p>
+<textarea id="spot" spellcheck="false" placeholder="11/555/851&#10;12 1114 1706"></textarea>
+<div class="actions">
+  <button id="check">Check these</button>
+  <span id="spotStatus" class="muted"></span>
+</div>
+<div class="scroll"><table id="spotResults" hidden>
+  <thead><tr><th>tile</th><th>result</th><th>URL</th></tr></thead>
+  <tbody></tbody>
+</table></div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let stopped = false, requests = 0;
+  const rows = [];
+
+  // -- rate limiting ------------------------------------------------------
+  // One shared gate for every probe, whichever mode issued it. JS is
+  // single-threaded, so reserving the next slot is atomic between the read and
+  // the write below -- no lock needed.
+
+  let nextSlot = 0;
+  async function gate() {
+    const gap = 1000 / Math.max(1, +$("rps").value || 12);
+    const wait = Math.max(0, nextSlot - performance.now());
+    nextSlot = performance.now() + wait + gap;
+    if (wait > 0) await sleep(wait);
+  }
+
+  // An <img> reports load/error without needing CORS. It cannot expose the
+  // status code, but "did a picture arrive" is the question being asked, and it
+  // is the same question the map viewer itself asks.
+  function probeRaw(u, timeoutMs) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        img.onload = img.onerror = null;
+        img.src = "";
+        resolve(v);
+      };
+      const timer = setTimeout(() => done("timeout"), timeoutMs);
+      img.onload = () => done(img.naturalWidth > 0 ? "ok" : "empty");
+      img.onerror = () => done("missing");
+      img.src = u;
+    });
+  }
+
+  async function probe(z, x, y) {
+    if (stopped) return "stopped";
+    await gate();
+    if (stopped) return "stopped";
+    requests++;
+    return probeRaw(url(z, x, y), 15000);
+  }
+
+  // -- config -------------------------------------------------------------
+
+  function parseBounds() {
+    try {
+      const raw = JSON.parse($("bounds").value);
+      const out = {};
+      for (const k of Object.keys(raw)) {
+        const z = parseInt(k, 10);
+        if (!Number.isFinite(z)) continue;
+        const b = raw[k];
+        out[z] = { minX: +b.minX, maxX: +b.maxX, minY: +b.minY, maxY: +b.maxY };
+      }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  const width = (b) => b.maxX - b.minX + 1;
+  const height = (b) => b.maxY - b.minY + 1;
+
+  function url(z, x, y) {
+    return $("tpl").value
+      .replaceAll("{code}", $("code").value.trim())
+      .replaceAll("{z}", z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  const mode = () => document.querySelector('input[name=mode]:checked').value;
+
+  // -- canvas -------------------------------------------------------------
+
+  let view = null;
+
+  function setupCanvas(b, stride) {
+    const cols = Math.ceil(width(b) / stride), rws = Math.ceil(height(b) / stride);
+    const cell = Math.max(1, Math.min(14, Math.floor(900 / Math.max(cols, 1))));
+    canvas.width = cols * cell;
+    canvas.height = rws * cell;
+    ctx.fillStyle = "#6b7280";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    $("orient").textContent =
+      `${cols} × ${rws} cells` + (stride > 1 ? ` · one per ${stride} tiles` : "") +
+      " · north at top, west at left";
+    view = { cell, stride, b };
+  }
+
+  function paint(x, y, exists) {
+    if (!view) return;
+    const cx = Math.floor((x - view.b.minX) / view.stride) * view.cell;
+    const cy = Math.floor((y - view.b.minY) / view.stride) * view.cell;
+    ctx.fillStyle = exists ? "#22c55e" : "#dc2626";
+    ctx.fillRect(cx, cy, view.cell, view.cell);
+  }
+
+  // -- edge finding -------------------------------------------------------
+
+  // Evenly spread sample positions along a line, endpoints included.
+  function samplePoints(lo, hi, count) {
+    const span = hi - lo + 1;
+    if (span <= count) return Array.from({ length: span }, (_, i) => lo + i);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push(lo + Math.round(i * (span - 1) / (count - 1)));
+    }
+    return [...new Set(out)];
+  }
+
+  async function testPoints(z, axis, index, pts) {
+    // Fired together: a line is a handful of requests, and awaiting them one at
+    // a time is what made the first version feel like a full download.
+    const results = await Promise.all(pts.map((p) => {
+      const x = axis === "x" ? index : p;
+      const y = axis === "x" ? p : index;
+      return probe(z, x, y).then((r) => {
+        if (r === "ok" || r === "missing") paint(x, y, r === "ok");
+        return r;
+      });
+    }));
+    return results.some((r) => r === "ok");
+  }
+
+  // Does this column (axis 'x') or row (axis 'y') hold any tile at all?
+  async function lineHasContent(z, b, axis, index, samples) {
+    const [lo, hi] = axis === "x" ? [b.minY, b.maxY] : [b.minX, b.maxX];
+    const coarse = samplePoints(lo, hi, samples);
+    if (await testPoints(z, axis, index, coarse)) return true;
+    if (stopped) return false;
+
+    // Nothing found -- but calling a line empty is what stops the walk and
+    // fixes the edge, so it is the one answer worth paying to be sure of.
+    // Evenly-spaced sampling steps straight over a thin feature (a road, a
+    // narrow strip of park), and near an edge is exactly where coverage is
+    // thinnest. Look again four times as finely before believing it.
+    const seen = new Set(coarse);
+    const fine = samplePoints(lo, hi, samples * 4).filter((p) => !seen.has(p));
+    if (!fine.length) return false;
+    return testPoints(z, axis, index, fine);
+  }
+
+  // Walk out from the declared edge (in case the box is too small), then in
+  // (in case it is too big), and stop at the first line holding content.
+  async function findEdge(z, b, axis, side, samples) {
+    const declared = axis === "x"
+      ? (side < 0 ? b.minX : b.maxX)
+      : (side < 0 ? b.minY : b.maxY);
+    const limit = axis === "x" ? width(b) : height(b);
+
+    // Outward first, in case the declared box is too small.
+    let out = declared;
+    for (let step = 1; step <= Math.min(64, limit) && !stopped; step++) {
+      const idx = declared + (side < 0 ? -step : step);
+      if (await lineHasContent(z, b, axis, idx, samples)) out = idx;
+      else break;
+    }
+    if (out !== declared) return { index: out, direction: "wider" };
+
+    // Then inward until something is found.
+    for (let step = 0; step <= limit && !stopped; step++) {
+      const idx = declared + (side < 0 ? step : -step);
+      if (await lineHasContent(z, b, axis, idx, samples)) {
+        return { index: idx, direction: step === 0 ? "exact" : "narrower" };
+      }
+    }
+    return { index: null, direction: "empty" };
+  }
+
+  // -- density ------------------------------------------------------------
+
+  async function measureDensity(z, b, n) {
+    const total = width(b) * height(b);
+    const want = Math.min(n, total);
+    const seen = new Set();
+    const picks = [];
+    while (picks.length < want) {
+      const x = b.minX + Math.floor(Math.random() * width(b));
+      const y = b.minY + Math.floor(Math.random() * height(b));
+      const key = x + "," + y;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      picks.push([x, y]);
+    }
+    let hits = 0, done = 0;
+    const conc = 8;
+    let next = 0;
+    async function worker() {
+      while (next < picks.length && !stopped) {
+        const [x, y] = picks[next++];
+        const r = await probe(z, x, y);
+        if (r === "stopped") return;
+        done++;
+        if (r === "ok") hits++;
+        paint(x, y, r === "ok");
+        if (done % 20 === 0) {
+          $("status").textContent =
+            `z${z}: density ${done}/${picks.length} · ${(hits / done * 100).toFixed(0)}% filled`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, worker));
+    if (!done) return null;
+    const p = hits / done;
+    // 95% confidence interval for a proportion.
+    const moe = 1.96 * Math.sqrt(Math.max(p * (1 - p), 1e-9) / done);
+    return { p, moe, n: done };
+  }
+
+  // -- full sweep ---------------------------------------------------------
+
+  function strideFor(b, budget) {
+    let s = 1;
+    while (Math.ceil(width(b) / s) * Math.ceil(height(b) / s) > budget) s++;
+    return s;
+  }
+
+  async function fullSweep(z, b, budget) {
+    const stride = strideFor(b, budget);
+    setupCanvas(b, stride);
+    const tiles = [];
+    for (let y = b.minY; y <= b.maxY; y += stride) {
+      for (let x = b.minX; x <= b.maxX; x += stride) tiles.push([x, y]);
+    }
+    let hits = 0, done = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let next = 0;
+    async function worker() {
+      while (next < tiles.length && !stopped) {
+        const [x, y] = tiles[next++];
+        const r = await probe(z, x, y);
+        if (r === "stopped") return;
+        done++;
+        if (r === "ok") {
+          hits++;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+        paint(x, y, r === "ok");
+        if (done % 20 === 0) {
+          $("status").textContent = `z${z}: ${done}/${tiles.length} · ${hits} exist`;
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: 8 }, worker));
+    return {
+      stride, checked: done,
+      observed: hits ? { minX, maxX, minY, maxY } : null,
+      density: done ? { p: hits / done, moe: 0, n: done } : null,
+    };
+  }
+
+  // -- per-zoom driver ----------------------------------------------------
+
+  async function runZoom(z, bounds) {
+    const b = bounds[z];
+    if (!b) return null;
+    const before = requests;
+
+    if (mode() === "full") {
+      const r = await fullSweep(z, b, Math.max(100, +$("budget").value || 2500));
+      return { z, declared: b, ...r, requests: requests - before, exhaustive: r.stride === 1 };
+    }
+
+    setupCanvas(b, strideFor(b, 4000));
+    const samples = Math.max(3, +$("samples").value || 12);
+
+    const west  = await findEdge(z, b, "x", -1, samples);
+    const east  = await findEdge(z, b, "x", +1, samples);
+    const north = await findEdge(z, b, "y", -1, samples);
+    const south = await findEdge(z, b, "y", +1, samples);
+
+    const observed = (west.index === null || east.index === null ||
+                      north.index === null || south.index === null)
+      ? null
+      : { minX: west.index, maxX: east.index, minY: north.index, maxY: south.index };
+
+    const density = (stopped || mode() === "edgesonly") ? null
+      : await measureDensity(z, b, Math.max(50, +$("density").value || 400));
+
+    return { z, declared: b, observed, density, requests: requests - before, stride: null };
+  }
+
+  function verdict(r) {
+    if (!r.observed) return ['<span class="bad">nothing responded</span>', "nothing responded"];
+    const d = r.declared, o = r.observed;
+    const diffs = [];
+    if (o.minX !== d.minX) diffs.push(`west ${d.minX}→${o.minX}`);
+    if (o.maxX !== d.maxX) diffs.push(`east ${d.maxX}→${o.maxX}`);
+    if (o.minY !== d.minY) diffs.push(`north ${d.minY}→${o.minY}`);
+    if (o.maxY !== d.maxY) diffs.push(`south ${d.maxY}→${o.maxY}`);
+
+    const fill = r.density ? r.density.p : null;
+    if (diffs.length) {
+      const t = `box wrong: ${diffs.join(", ")}`;
+      return [`<span class="bad">${t}</span>`, t];
+    }
+    if (fill === null) return ['<span class="ok">box confirmed</span>', "box confirmed"];
+    if (fill > 0.9) return ['<span class="ok">box confirmed, essentially full</span>', "box confirmed, full"];
+    const t = `box confirmed, ${Math.round((1 - fill) * 100)}% of it empty`;
+    return [`<span class="warn">${t}</span>`, t];
+  }
+
+  function addRow(r) {
+    const [html, text] = verdict(r);
+    const d = r.declared, o = r.observed;
+    const fill = r.density
+      ? `${(r.density.p * 100).toFixed(1)}%` +
+        (r.density.moe ? ` <span class="muted">±${(r.density.moe * 100).toFixed(1)}</span>` : "")
+      : "—";
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.z}</td>` +
+      `<td>${r.requests.toLocaleString()}</td>` +
+      `<td class="mono">${d.minX}-${d.maxX}, ${d.minY}-${d.maxY}</td>` +
+      `<td class="mono">${o ? `${o.minX}-${o.maxX}, ${o.minY}-${o.maxY}` : "—"}</td>` +
+      `<td>${fill}</td>` +
+      `<td>${html}</td>`;
+    $("results").tBodies[0].appendChild(tr);
+
+    rows.push(
+      `z${r.z}\t${r.requests} requests` +
+      `\tdeclared ${d.minX}-${d.maxX},${d.minY}-${d.maxY}` +
+      `\tobserved ${o ? `${o.minX}-${o.maxX},${o.minY}-${o.maxY}` : "none"}` +
+      `\tfill ${r.density ? (r.density.p * 100).toFixed(1) + "%" +
+        (r.density.moe ? ` ±${(r.density.moe * 100).toFixed(1)}` : "") +
+        ` (n=${r.density.n})` : "n/a"}\t${text}`
+    );
+    $("copy").disabled = false;
+  }
+
+  function busy(on) {
+    for (const id of ["scan", "scanAll", "check"]) $(id).disabled = on;
+    $("stop").disabled = !on;
+  }
+
+  async function go(zooms) {
+    const bounds = parseBounds();
+    if (!bounds) { $("status").textContent = "boundsByZoom is not valid JSON"; return; }
+    stopped = false;
+    busy(true);
+    try {
+      for (const z of zooms) {
+        if (stopped) break;
+        const r = await runZoom(z, bounds);
+        if (r) addRow(r);
+      }
+      $("status").textContent = stopped ? "stopped" : `done · ${requests.toLocaleString()} requests total`;
+    } finally { busy(false); }
+  }
+
+  // -- wiring -------------------------------------------------------------
+
+  function refreshZooms() {
+    const bounds = parseBounds();
+    const sel = $("zoom"), prev = sel.value;
+    sel.innerHTML = "";
+    if (!bounds) { $("plan").textContent = "boundsByZoom is not valid JSON"; return; }
+    for (const z of Object.keys(bounds).map(Number).sort((a, b) => a - b)) {
+      const o = document.createElement("option");
+      o.value = z;
+      o.textContent = `z${z}  (${(width(bounds[z]) * height(bounds[z])).toLocaleString()} tiles)`;
+      sel.appendChild(o);
+    }
+    if (prev) sel.value = prev;
+    refreshPlan();
+  }
+
+  function refreshPlan() {
+    const bounds = parseBounds();
+    if (!bounds) return;
+    const b = bounds[+$("zoom").value];
+    if (!b) return;
+    const rps = Math.max(1, +$("rps").value || 12);
+    let n;
+    if (mode() === "full") {
+      const s = strideFor(b, Math.max(100, +$("budget").value || 2500));
+      n = Math.ceil(width(b) / s) * Math.ceil(height(b) / s);
+    } else {
+      // Four edges; a few lines each; a line that comes back empty is retested
+      // four times as finely, and on the way to an edge most lines are empty.
+      n = 4 * 3 * Math.max(3, +$("samples").value || 12) * 5;
+      if (mode() === "edges") n += Math.max(50, +$("density").value || 400);
+    }
+    const secs = n / rps;
+    $("plan").textContent =
+      `about ${n.toLocaleString()} requests · ` +
+      (secs < 90 ? `${Math.ceil(secs)}s` : `${Math.ceil(secs / 60)} min`) +
+      (mode() !== "full" ? " (estimate — edges stop as soon as they find content)" : "");
+  }
+
+  $("bounds").addEventListener("input", refreshZooms);
+  for (const id of ["zoom", "budget", "rps", "samples", "density"]) {
+    $(id).addEventListener("input", refreshPlan);
+  }
+  for (const el of document.querySelectorAll('input[name=mode]')) {
+    el.addEventListener("change", refreshPlan);
+  }
+
+  $("scan").addEventListener("click", () => go([+$("zoom").value]));
+  $("scanAll").addEventListener("click", () => {
+    const bounds = parseBounds();
+    if (bounds) go(Object.keys(bounds).map(Number).sort((a, b) => a - b));
+  });
+  $("stop").addEventListener("click", () => { stopped = true; $("status").textContent = "stopping…"; });
+
+  $("copy").addEventListener("click", () => {
+    const text = rows.join("\n");
+    $("summary").hidden = false;
+    $("summary").textContent = text;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+  });
+
+  $("check").addEventListener("click", async () => {
+    const tasks = [];
+    for (const line of $("spot").value.split("\n")) {
+      const p = line.trim().split(/[\/\s,]+/).map(Number);
+      if (p.length >= 3 && p.slice(0, 3).every(Number.isFinite)) tasks.push(p.slice(0, 3));
+    }
+    if (!tasks.length) { $("spotStatus").textContent = "nothing parsed — one z/x/y per line"; return; }
+
+    const table = $("spotResults");
+    table.hidden = false;
+    table.tBodies[0].innerHTML = "";
+    stopped = false;
+    busy(true);
+    let loaded = 0;
+    for (const [z, x, y] of tasks) {
+      if (stopped) break;
+      const r = await probe(z, x, y);
+      if (r === "ok") loaded++;
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td class="mono">${z}/${x}/${y}</td>` +
+        `<td class="${r === "ok" ? "bad" : "ok"}">` +
+        `${r === "ok" ? "loads fine" : r === "timeout" ? "timed out" : "no tile"}</td>` +
+        `<td class="mono muted">${url(z, x, y)}</td>`;
+      table.tBodies[0].appendChild(tr);
+    }
+    busy(false);
+    $("spotStatus").innerHTML = loaded
+      ? `<span class="bad">${loaded} of ${tasks.length} loaded fine — those were not really missing.</span>`
+      : `<span class="ok">none of the ${tasks.length} loaded — genuinely absent.</span>`;
+  });
+
+  refreshZooms();
+})();
+</script>
+</body>
+</html>

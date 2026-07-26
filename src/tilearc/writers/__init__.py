@@ -18,7 +18,7 @@ from .dirw import DirWriter
 from .mbtiles import MBTilesWriter
 from .zipw import ZipWriter
 
-FORMATS = ("zip", "dir", "mbtiles")
+FORMATS = ("zip", "dir", "mbtiles", "library")
 
 
 def default_output(plan: JobPlan, fmt: str) -> Path:
@@ -27,6 +27,10 @@ def default_output(plan: JobPlan, fmt: str) -> Path:
         return Path(f"{stem}.zip")
     if fmt == "mbtiles":
         return Path(f"{stem}.mbtiles")
+    if fmt == "library":
+        # The library root is shared by every park and version, so it is not
+        # named after this job. Its own tree provides the per-version folder.
+        return Path("library")
     return Path(stem)
 
 
@@ -37,6 +41,10 @@ def build_writer(fmt: str, output: Path, plan: JobPlan) -> TileWriter:
         return DirWriter(output, plan)
     if fmt == "mbtiles":
         return MBTilesWriter(output, plan)
+    if fmt == "library":
+        from ..library import LibraryWriter
+
+        return LibraryWriter(output, plan)
     raise ValueError(f"unknown output format: {fmt}")
 
 

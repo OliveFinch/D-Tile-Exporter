@@ -28,13 +28,27 @@ from .job import JobRequest, run_job
 from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan
 from .progress import Progress
 from .state import default_state_path
-from .tdr import build_tdr_source, check_worker_quota, load_credentials, normalise_modes
+from .tdr import (
+    WORKER_DAILY_QUOTA,
+    build_tdr_source,
+    check_worker_quota,
+    load_credentials,
+    normalise_modes,
+)
+from .trace import BatchProbe, TraceOptions, coverage_payload
+from .trace import estimate_requests as estimate_trace_requests
+from .trace import trace as trace_coverage
 from .urls import build_source
 from .util import human_bytes, sanitize_component
 from .verify import verify as verify_archive
 from .writers import FORMATS, default_output
 
 DEFAULT_MAX_TILES = 250_000
+
+#: Tile probes per Worker request when tracing through a batch endpoint.
+#: Measured on TDR-shaped work, where the walk dominates and each ring step
+#: costs one call regardless of how many tiles a batch could carry.
+BATCH_REDUCTION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +413,257 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trace(args: argparse.Namespace) -> int:
+    """Walk each zoom's coverage border and report the footprint it encloses.
+
+    Unlike ``discover`` this works for credentialled parks, which is the whole
+    reason it exists on this side rather than only in the browser tool: TDR's
+    tiles need signed cookies on the request, and an ``<img>`` cannot carry
+    them.
+    """
+    repo = repository_from(args)
+    park = repo.park(args.park)
+    version = repo.version(args.park, args.version)
+
+    # Every zoom with bounds, not just those inside the declared minZoom/maxZoom.
+    # `select_zooms` excludes the rest on the grounds that they are "not part of
+    # the map" -- reasonable when planning a download, wrong when the job is to
+    # find out what is actually served. Shanghai settled that: it declares
+    # minZoom 14 and serves z12 and z13 perfectly well. A measurement should not
+    # inherit the assumption it exists to test.
+    candidates = sorted(park.bounds_by_zoom)
+    if args.min_zoom is not None:
+        candidates = [z for z in candidates if z >= args.min_zoom]
+    if args.max_zoom is not None:
+        candidates = [z for z in candidates if z <= args.max_zoom]
+    zooms = [(z, park.bounds_at(z)) for z in candidates]
+    if not zooms:
+        raise TilearcError("no zoom levels with bounds to trace")
+    undeclared = [z for z, _b in zooms if z < park.min_zoom or z > park.max_zoom]
+
+    # -- sources ----------------------------------------------------------
+    if park.requires_credentials:
+        credentials = load_credentials(park, args.tdr_credentials, warn=warn)
+        expiry = credentials.expiry_warning()
+        if expiry:
+            warn(expiry)
+        modes = normalise_modes(args.mode)
+        sources = {
+            mode: build_tdr_source(park, version.code, mode, credentials, direct=args.direct)
+            for mode in modes
+        }
+    else:
+        sources = {"": build_source(park, version)}
+
+    options = TraceOptions(
+        margin=args.margin,
+        concurrency=args.concurrency,
+        rps=args.rps,
+        max_requests=args.max_requests,
+        max_regions=args.max_regions,
+    )
+    per_mode = estimate_trace_requests(zooms)
+    upper_bound = per_mode * len(sources)
+
+    info(f"park     {park.park_id}  {park.label}")
+    info(f"version  {version.code}")
+    if len(sources) > 1 or any(sources):
+        info(f"modes    {', '.join(m or 'default' for m in sources)}")
+    info(f"zooms    {', '.join(str(z) for z, _b in zooms)}")
+    if undeclared:
+        info(
+            f"         including z{', z'.join(str(z) for z in undeclared)}, outside the "
+            f"declared {park.min_zoom}-{park.max_zoom} range but with bounds to check"
+        )
+    info(f"cost     roughly {upper_bound:,} requests, scaling with perimeter not area")
+    info(f"polite   concurrency {options.concurrency}, {options.rps:g} req/s")
+
+    warnings: list[str] = []
+    if any(source.uses_shared_proxy for source in sources.values()):
+        if args.probe_url:
+            # Measured at about 3x on TDR-shaped work, not the batch size: the
+            # walk dominates, and one ring step is one batch call however many
+            # tiles a batch could hold. The real gain is that a refusal comes
+            # back as a refusal.
+            batches = -(-upper_bound // BATCH_REDUCTION)
+            info("")
+            info(f"batched  {args.probe_url}")
+            info(
+                f"         reports refusals as refusals rather than as missing tiles, "
+                f"which is\n         the ambiguity that makes Worker-routed traces "
+                f"untrustworthy. Roughly\n         {batches:,} Worker requests instead of "
+                f"{upper_bound:,} -- about 3x, since a ring step is\n         one call "
+                f"whatever the batch size allows."
+            )
+        elif args.my_worker:
+            # Owning it does not make the free tier's 100k/day imaginary, and
+            # live viewer traffic still shares it -- but the cost is a fact to
+            # report, not a warning to issue.
+            share = upper_bound / WORKER_DAILY_QUOTA * 100
+            info("")
+            info(
+                f"worker   your own, so no cap applied. This is {upper_bound:,} requests, "
+                f"~{share:.0f}% of\n         the free tier's {WORKER_DAILY_QUOTA:,}/day, "
+                f"shared with live viewer traffic."
+            )
+            info(
+                "         --probe-url cuts that to about a third and, more to the "
+                "point, tells\n         a refusal from a missing tile; see "
+                "tools/worker-exists-endpoint.js"
+            )
+        else:
+            warnings.extend(
+                check_worker_quota(upper_bound, forced=args.force, cap=args.worker_max_tiles)
+            )
+        if not args.probe_url:
+            info("")
+            info(
+                "note     the tile proxy answers 204 both for a missing tile and for an "
+                "upstream\n         refusal, so the two are indistinguishable here. Every "
+                "zoom is audited\n         afterwards; --probe-url or --direct removes the "
+                "ambiguity outright."
+            )
+    for message in warnings:
+        warn(message)
+    info("")
+
+    if args.dry_run:
+        info("dry run -- stopping before any request")
+        return 0
+    if not _confirm("Walk the coverage border for these zooms?", args.yes):
+        info("aborted")
+        return 1
+
+    progress = Progress(upper_bound, enabled=not args.no_progress)
+    results: dict[str, list] = {}
+    for mode, source in sources.items():
+        batch = None
+        if args.probe_url:
+            batch = BatchProbe(
+                url=args.probe_url,
+                server_id=(
+                    load_credentials(park, args.tdr_credentials).server_id or version.code
+                ),
+                mode=mode or "daytime",
+                limit=args.probe_batch,
+                token=args.probe_token,
+            )
+        results[mode] = asyncio.run(
+            trace_coverage(
+                source, zooms, options,
+                on_request=progress.tick,
+                on_zoom_done=lambda _t: None,
+                batch=batch,
+            )
+        )
+    progress.close()
+
+    if args.json:
+        emit_json({
+            "park": park.park_id,
+            "version": version.code,
+            "requests": sum(t.requests for group in results.values() for t in group),
+            "modes": {mode or "default": coverage_payload(group) for mode, group in results.items()},
+        })
+        return 0
+
+    incomplete = 0
+    for mode, group in results.items():
+        info("")
+        if mode:
+            info(f"--- {mode}")
+        info(f"{'zoom':>5}  {'requests':>9}  {'footprint':<30} {'tiles':>9}  shape")
+        for item in group:
+            box = item.box
+            where = (
+                f"{box.min_x}-{box.max_x}, {box.min_y}-{box.max_y}" if box else "-"
+            )
+            info(f"{item.zoom:>5}  {item.requests:>9,}  {where:<30} {item.covered:>9,}  "
+                 f"{item.describe()}")
+            if not item.complete:
+                incomplete += 1
+            for run in item.runs() if item.regions and not item.rectangle else []:
+                info(f"{'':>5}  rows {run[0]}-{run[1]}: x {run[2]}-{run[3]}")
+
+    total = sum(t.covered for group in results.values() for t in group)
+    info("")
+    info(f"{sum(t.requests for g in results.values() for t in g):,} requests, "
+         f"{total:,} tiles across {len(zooms)} zoom(s)"
+         + (f" x {len(results)} modes" if len(results) > 1 else ""))
+    if incomplete:
+        warn(f"{incomplete} zoom(s) did not finish cleanly -- see the shape column. "
+             f"Those figures are floors, not measurements.")
+        return 1
+    return 0
+
+
+def cmd_library(args: argparse.Namespace) -> int:
+    """Report on, or query, a library tree's catalogue."""
+    from .library import Catalogue, human_saving
+
+    root = Path(args.root)
+    if not (root / "catalogue.sqlite").is_file():
+        raise TilearcError(
+            f"no catalogue at {root / 'catalogue.sqlite'}. Download with "
+            f"--format library --output {root} first."
+        )
+    catalogue = Catalogue(root)
+    try:
+        # -- resolve one tile ---------------------------------------------
+        if args.resolve:
+            try:
+                park, version, z, x, y = args.resolve
+                path = catalogue.resolve(park, version, int(z), int(x), int(y), args.mode or "")
+            except ValueError as exc:
+                raise TilearcError(f"--resolve wants PARK VERSION Z X Y: {exc}") from exc
+            if path is None:
+                info("not in the library")
+                return 1
+            print(path)
+            return 0
+
+        # -- dump the index -----------------------------------------------
+        if args.export:
+            payload = catalogue.export_index(args.park)
+            Path(args.export).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            info(f"wrote {args.export}")
+            return 0
+
+        stats = catalogue.stats()
+        if args.park:
+            stats = [row for row in stats if row["park"] == args.park]
+        if args.json:
+            emit_json({"root": str(root), "versions": stats, "totals": human_saving(stats)})
+            return 0
+
+        if not stats:
+            info("the library is empty")
+            return 0
+
+        info(f"{root}")
+        info("")
+        info(f"{'park':<6} {'version':<18} {'tiles':>10} {'stored here':>12} "
+             f"{'reused':>9} {'on disk':>10}")
+        for row in stats:
+            reused = row["tiles"] - row["stored"]
+            info(f"{row['park']:<6} {row['version']:<18} {row['tiles']:>10,} "
+                 f"{row['stored']:>12,} {reused:>9,} "
+                 f"{human_bytes(row['stored_bytes'] or 0):>10}")
+
+        totals = human_saving(stats)
+        info("")
+        info(f"on disk  {human_bytes(totals['storedBytes'])}")
+        info(f"as if every version were archived separately  "
+             f"{human_bytes(totals['logicalBytes'])}")
+        if totals["logicalBytes"]:
+            saved = totals["savedBytes"] / totals["logicalBytes"] * 100
+            info(f"saved by not storing unchanged tiles twice  "
+                 f"{human_bytes(totals['savedBytes'])} ({saved:.0f}%)")
+        return 0
+    finally:
+        catalogue.close()
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     report = verify_archive(args.path, deep=not args.quick)
     if args.json:
@@ -556,6 +821,7 @@ def cmd_download(args: argparse.Namespace) -> int:
         state_path=state_path,
         options=options,
         restart=args.restart,
+        retry_missing=args.retry_missing,
     )
 
     try:
@@ -665,7 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
     download = subparsers.add_parser("download", help="archive a version's tiles")
     download.add_argument("--park", required=True)
     download.add_argument("--version", required=True)
-    download.add_argument("--format", choices=FORMATS, default="zip")
+    download.add_argument(
+        "--format", choices=FORMATS, default="zip",
+        help="zip, dir, mbtiles, or library. 'library' writes into a shared tree "
+             "at --output, storing a tile only when its bytes differ from what an "
+             "earlier version already holds, and indexing every version's tiles in "
+             "a catalogue so a reader can find them.",
+    )
     download.add_argument("-o", "--output", help="output path (default: {park}_{version}.zip)")
     add_selection_args(download)
 
@@ -709,6 +981,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--state-db", help="path to the job state DB")
     resume.add_argument(
         "--restart", action="store_true", help="discard existing job state and start over"
+    )
+    resume.add_argument(
+        "--retry-missing", action="store_true",
+        help="re-ask for tiles previously recorded as having no imagery, keeping "
+             "downloaded ones (use when a run was rate-limited)",
     )
     resume.add_argument("--no-progress", action="store_true")
 
@@ -756,6 +1033,103 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--json", action="store_true")
     add_source_args(discover_parser)
     discover_parser.set_defaults(func=cmd_discover)
+
+    trace_parser = subparsers.add_parser(
+        "trace",
+        help="walk each zoom's coverage border and report the real footprint",
+        description=(
+            "Follows the outline of the imagery tile by tile and fills what it "
+            "encloses, so an L-shaped or bitten footprint is reported as it is "
+            "rather than as the rectangle that bounds it. Costs the perimeter, "
+            "not the area. Unlike 'discover' this works for credentialled parks."
+        ),
+    )
+    trace_parser.add_argument("--park", required=True)
+    trace_parser.add_argument("--version", required=True)
+    trace_parser.add_argument("--min-zoom", type=int)
+    trace_parser.add_argument("--max-zoom", type=int)
+    trace_parser.add_argument(
+        "--margin", type=int, default=8,
+        help="how far outside the declared box the walk may stray (default 8 tiles)",
+    )
+    trace_parser.add_argument(
+        "--max-requests", type=int, default=60_000,
+        help="per-zoom ceiling, so a runaway walk cannot spend all night",
+    )
+    trace_parser.add_argument(
+        "--max-regions", type=int, default=6,
+        help="distinct regions to report per zoom before giving up looking (default 6)",
+    )
+    trace_parser.add_argument("--concurrency", type=int, default=6)
+    trace_parser.add_argument("--rps", type=float, default=12.0)
+    trace_parser.add_argument(
+        "--mode", default="both", help="TDR only: daytime, nighttime, or both",
+    )
+    trace_parser.add_argument(
+        "--direct", action="store_true",
+        help="TDR only: go to the origin with CloudFront cookies instead of the "
+             "shared Worker. Slower to set up, but a 403 is then distinguishable "
+             "from a missing tile, which the Worker's 204 is not.",
+    )
+    trace_parser.add_argument("--tdr-credentials")
+    trace_parser.add_argument(
+        "--probe-url",
+        help="URL of a batch existence endpoint on your own Worker (see "
+             "tools/worker-exists-endpoint.js). Asks about tiles in bulk, so a trace "
+             "costs hundreds of Worker requests instead of tens of thousands, and a "
+             "refusal comes back as a refusal instead of as a missing tile.",
+    )
+    trace_parser.add_argument(
+        "--probe-token",
+        default=os.environ.get("TILEARC_PROBE_TOKEN"),
+        help="bearer token for --probe-url, if the endpoint is guarded. "
+             "Env: TILEARC_PROBE_TOKEN",
+    )
+    trace_parser.add_argument(
+        "--probe-batch", type=int, default=48,
+        help="tiles per batch request (default 48; Cloudflare's free tier allows 50 "
+             "subrequests per invocation)",
+    )
+    trace_parser.add_argument(
+        "--my-worker", action="store_true",
+        help="the Worker is yours: report the quota cost rather than capping the run",
+    )
+    trace_parser.add_argument(
+        "--worker-max-tiles", type=int, default=10_000,
+        help="safety cap on requests routed through the shared Worker",
+    )
+    trace_parser.add_argument("--force", action="store_true")
+    trace_parser.add_argument("-y", "--yes", action="store_true")
+    trace_parser.add_argument("--dry-run", action="store_true")
+    trace_parser.add_argument("--no-progress", action="store_true")
+    trace_parser.add_argument("--json", action="store_true")
+    add_source_args(trace_parser)
+    trace_parser.set_defaults(func=cmd_trace)
+
+    library = subparsers.add_parser(
+        "library",
+        help="report on a multi-version library tree",
+        description=(
+            "A library stores each version's tiles only where they differ from an "
+            "earlier version, and indexes every version's tiles in a catalogue so a "
+            "reader can find bytes that live under another version's folder. This "
+            "reports what is held, and can resolve individual tiles."
+        ),
+    )
+    library.add_argument("--root", default="library", help="the library directory")
+    library.add_argument("--park", help="limit the report to one park")
+    library.add_argument(
+        "--resolve", nargs=5, metavar=("PARK", "VERSION", "Z", "X", "Y"),
+        help="print the file holding one tile, wherever it actually lives",
+    )
+    library.add_argument("--mode", default="", help="TDR only: daytime or nighttime")
+    library.add_argument(
+        "--export", metavar="FILE",
+        help="write a JSON index of where every tile lives, for a reader that is "
+             "not SQLite",
+    )
+    library.add_argument("--json", action="store_true")
+    library.set_defaults(func=cmd_library)
 
     verify = subparsers.add_parser("verify", help="check an archive's integrity")
     verify.add_argument("path")

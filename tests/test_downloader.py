@@ -291,6 +291,73 @@ def test_a_clean_job_reports_no_throttling(repo, tmp_path):
     assert not any("pushed back" in w for w in result.warnings)
 
 
+def test_a_block_partway_through_is_caught(repo, tmp_path):
+    """The failure this exists for: fine at first, then refused.
+
+    `_check_all_missing` only fires before the first success, so a job that
+    starts working and is then rate-limited used to record every remaining
+    tile as permanently missing and report zero failures.
+    """
+    served = {"n": 0}
+
+    def handler(request):
+        served["n"] += 1
+        # Two real tiles, then a burst of 403s, then the throttle eases. The
+        # verification re-request lands after it eases and comes back with a
+        # picture -- which is what gives the "missing" verdicts away as false.
+        if served["n"] <= 2:
+            return httpx.Response(200, content=JPEG)
+        if served["n"] <= 5:
+            return httpx.Response(403)
+        return httpx.Response(200, content=JPEG)
+
+    plan = make_plan(repo, min_zoom=14, max_zoom=14)
+    options = DownloadOptions(concurrency=1, rps=0, retries=1, missing_run_probe=3)
+
+    with pytest.raises(TilearcError) as excinfo:
+        run_job(plan, handler, tmp_path, options=options)
+
+    message = str(excinfo.value)
+    assert "refusing requests" in message
+    assert "--retry-missing" in message
+
+
+def test_a_genuinely_sparse_park_is_not_mistaken_for_a_block(repo, tmp_path):
+    """Long runs of missing are normal: bounds are rectangles, coverage is not."""
+    def handler(request):
+        # A stable hole: these tiles are absent on the re-request too.
+        return httpx.Response(200, content=JPEG) if "7148" in str(request.url) \
+            else httpx.Response(404)
+
+    plan = make_plan(repo, min_zoom=14, max_zoom=14)
+    options = DownloadOptions(concurrency=1, rps=0, retries=1, missing_run_probe=2)
+    _dl, result, _w, _s = run_job(plan, handler, tmp_path, options=options)
+
+    assert result.fetched == 4 and result.missing == 8
+    assert result.failed == 0
+
+
+def test_missing_run_check_can_be_disabled(repo, tmp_path):
+    def handler(request):
+        return httpx.Response(200, content=JPEG) if "7148" in str(request.url) \
+            else httpx.Response(403)
+
+    options = DownloadOptions(concurrency=1, rps=0, retries=1, missing_run_probe=0)
+    _dl, result, _w, _s = run_job(make_plan(repo), handler, tmp_path, options=options)
+    assert result.missing == 8
+
+
+def test_a_success_resets_the_missing_run(repo, tmp_path):
+    """Alternating hit/miss must never look like a run, however long the job."""
+    def handler(request):
+        return httpx.Response(404) if "7148" in str(request.url) \
+            else httpx.Response(200, content=JPEG)
+
+    options = DownloadOptions(concurrency=1, rps=0, retries=1, missing_run_probe=3)
+    _dl, result, _w, _s = run_job(make_plan(repo), handler, tmp_path, options=options)
+    assert result.fetched == 8 and result.missing == 4
+
+
 # ---------------------------------------------------------------------------
 # circuit breakers
 # ---------------------------------------------------------------------------
