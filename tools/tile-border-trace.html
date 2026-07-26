@@ -716,6 +716,82 @@
     return null;
   }
 
+  // A tile that is absent and a tile the CDN refused to serve look exactly the
+  // same to an <img>: both fire onerror. So a burst of throttling mid-walk does
+  // not look like trouble, it looks like the map ending -- and the walk turns
+  // and closes a small tidy loop around whatever it had reached. That is
+  // precisely the failure this project already fixed in the downloader, where
+  // a 403 was being recorded as a permanently missing tile.
+  //
+  // Guessing from the shape cannot separate the two: a genuinely small region
+  // and a truncated walk produce the same border. So do not guess -- ask
+  // again. Re-request the tiles the border rests on, the ones called absent
+  // right beside ones called present. If the map really ends there they are
+  // still absent and this costs a few dozen requests. If any of them answers,
+  // the border is drawn around a refusal and the measurement is void.
+  // Spread a sample across the whole list rather than taking the first few:
+  // throttling arrives in bursts, so corrupted verdicts sit together and a
+  // clustered sample could miss the burst or land wholly inside it.
+  function spread(all, want) {
+    const n = Math.min(all.length, want);
+    if (!n) return [];
+    const step = all.length / n;
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(all[Math.floor(i * step)]);
+    return out;
+  }
+
+  async function verifyBorder(regions) {
+    // Absences the border rests on: called empty, right beside something
+    // called present.
+    const suspects = new Map();
+    for (const region of regions) {
+      for (const key of region.filled) {
+        const [x, y] = key.split(",").map(Number);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy, k = nx + "," + ny;
+          if (cache.get(k) === false) suspects.set(k, [nx, ny]);
+        }
+      }
+    }
+    // With no border there is nothing to lean on, so fall back to whatever the
+    // seed sweep called empty -- which is the whole of an empty zoom.
+    if (!suspects.size) {
+      for (const [k, v] of cache) if (v === false) suspects.set(k, k.split(",").map(Number));
+    }
+
+    // Tiles already seen to answer. These are the control: if one of them has
+    // stopped answering, the server is refusing *now*, and in that state the
+    // absences prove nothing -- so a still-running throttle is caught even
+    // though re-asking about an absence would just be refused again.
+    const known = [];
+    for (const region of regions) {
+      for (const key of region.filled) known.push(key.split(",").map(Number));
+    }
+
+    const probes = spread([...suspects.values()], 24);
+    const controls = spread(known, 12);
+    const [answered, alive] = await Promise.all([
+      inOrder(probes.map(([x, y]) => () => recheck(x, y))),
+      inOrder(controls.map(([x, y]) => () => fetchTile(x, y))),
+    ]);
+    return {
+      flipped: probes.filter((_, i) => answered[i]),
+      dead: controls.filter((_, i) => !alive[i]),
+    };
+  }
+
+  //: Ask about one tile again, ignoring what the cache was told last time.
+  async function recheck(x, y) {
+    if (stopped) return false;
+    const got = await fetchTile(x, y);
+    if (got) {
+      cache.set(x + "," + y, true);
+      paint(x, y, "#f59e0b");
+    }
+    return got;
+  }
+
   // Which sides of the search window a traced region is pressed up against.
   // A border that reaches the window has not been measured -- it has been cut
   // off -- and the straight line it leaves behind is the window's edge, not the
@@ -783,11 +859,38 @@
       });
     }
 
-    return { z, declared, regions, requests, capped, margin };
+    // Before believing any of it, tell refusals apart from absences.
+    const audit = capped || stopped ? { flipped: [], dead: [] } : await verifyBorder(regions);
+
+    return { z, declared, regions, requests, capped, margin,
+             suspect: audit.flipped, dead: audit.dead, interrupted: stopped };
   }
 
   function describe(r) {
-    if (!r.regions.length) return { text: "no imagery found", cls: "bad" };
+    // Ahead of everything else, including "no imagery": if tiles the walk
+    // called absent answer on a second ask, nothing downstream of that verdict
+    // can be trusted, least of all a tidy-looking one.
+    if (r.suspect && r.suspect.length) {
+      const [x, y] = r.suspect[0];
+      return {
+        text: `unreliable — ${r.suspect.length} tile(s) the walk recorded as absent `
+            + `answered when asked again (e.g. ${x},${y}). The server was refusing `
+            + `requests, which is indistinguishable from empty here, so this border `
+            + `is drawn around a refusal. Re-run slower or with fewer in flight`,
+        cls: "bad",
+      };
+    }
+    if (r.dead && r.dead.length) {
+      const [x, y] = r.dead[0];
+      return {
+        text: `unreliable — the server stopped answering for ${r.dead.length} tile(s) `
+            + `it had already served (e.g. ${x},${y}), so it is refusing requests right `
+            + `now. While that is true an absent tile cannot be told from a refused one, `
+            + `and every edge here rests on one. Re-run slower or with fewer in flight`,
+        cls: "bad",
+      };
+    }
+    if (!r.regions.length) return { text: "no imagery found", cls: "muted" };
 
     // Say this first and say nothing else. A clipped walk cannot be called a
     // rectangle or not one, and the traced box is a lower bound rather than a
@@ -823,9 +926,12 @@
       );
     }
     if (r.capped) parts.push("hit the request cap");
+    // An irregular footprint is a finding, not a fault -- the walk went all
+    // the way round and this is what was there. Only the cap means the answer
+    // is unfinished, so only the cap reads as an error.
     return {
       text: parts.join(", "),
-      cls: bad.length || r.capped ? "bad" : (r.regions.length > 1 ? "warn" : "ok"),
+      cls: r.capped ? "bad" : (bad.length || r.regions.length > 1 ? "warn" : "ok"),
     };
   }
 
@@ -866,8 +972,11 @@
       // rectangle it is exactly the box, so it can be recovered for free.
       // Anything else genuinely is not known, and is left open to re-check
       // rather than filled in with a guess.
-      // An empty zoom is a finished answer with nothing to backfill.
-      if (out.clean === undefined && out.text === "no imagery found") out.clean = true;
+      // Completeness, not tidiness: an irregular footprint or an empty zoom is
+      // a finished measurement, and older rows recorded them as unsettled.
+      if (out.clean === undefined || out.clean === false) {
+        out.clean = !/search window|request cap|^unreliable/.test(out.text || "");
+      }
       if (!out.covered && out.traced && out.traced !== "—" && out.text === "a rectangle") {
         const [xs, ys] = out.traced.split(", ");
         const [minX, maxX] = xs.split("-").map(Number);
@@ -928,18 +1037,23 @@
     };
   }
 
-  //: A zoom is settled when the search ran to completion and the answer it
-  //  reached does not depend on a limit that was hit.
+  //: Whether the MEASUREMENT finished -- not whether the answer is tidy.
   //
-  //  "Nothing here" is one of those answers. A seed search that swept the
-  //  declared box within budget and found no imagery has established that the
-  //  zoom is empty -- that is a measurement, not a failure to measure, and
-  //  offering it back for re-checking asks someone to keep confirming a
-  //  finished result.
+  //  These are different things and conflating them was a mistake. Being a
+  //  rectangle is a property of the map; being complete is a property of the
+  //  walk. An irregular footprint traced all the way round inside its window
+  //  and its budget is a finished measurement that happens to report an
+  //  interesting shape, and sending someone back to re-walk it asks them to
+  //  keep re-confirming a result that was never in doubt. Same for a zoom
+  //  searched and found empty.
+  //
+  //  A measurement is unfinished only when the answer rests on a limit that
+  //  was hit: the request cap, the edge of the search window, a stop, or a
+  //  border whose "missing" tiles turn out to answer after all.
   function isCleanResult(r) {
-    if (r.capped) return false;              // ran out of budget: answer unknown
-    if (!r.regions.length) return true;      // searched, and there is nothing
-    return r.regions.every((g) => g.rectangle && !g.clipped.length);
+    if (r.capped || r.interrupted) return false;
+    if ((r.suspect && r.suspect.length) || (r.dead && r.dead.length)) return false;
+    return r.regions.every((g) => !g.clipped.length);
   }
 
   //: One row per map and zoom, always. A map and a zoom is a question with one
@@ -1182,9 +1296,11 @@
 
   //: Rows worth going back to. `clean` is recorded from now on; rows saved
   //  before it existed are judged from the verdict they carry.
+  // For rows saved before `clean` recorded completeness rather than tidiness,
+  // read it off the verdict: only these three say the walk was stopped short.
   const settled = (r) => typeof r.clean === "boolean"
     ? r.clean
-    : /^(a rectangle|no imagery found|\d+ separate regions, each a rectangle)$/.test(r.text);
+    : !/search window|request cap|^unreliable/.test(r.text);
 
   function unresolved() {
     return rows
