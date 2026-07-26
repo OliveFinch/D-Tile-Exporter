@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Coverage extract</title>
+<style>
+  :root {
+    --bg:#fff; --fg:#1a1a1a; --muted:#6b7280; --line:#d4d4d8; --panel:#f6f6f7;
+    --ok:#16a34a; --bad:#dc2626; --warn:#b45309; --accent:#2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#17181a; --fg:#e8e8ea; --muted:#9ca3af; --line:#34353a; --panel:#202126;
+      --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b; --accent:#60a5fa;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:26px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 18px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+    margin:0 0 16px; background:var(--panel); }
+  legend { padding:0 6px; font-weight:600; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:0 0 3px; }
+  input, button, textarea { font:inherit; color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; padding:6px 9px; }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:transparent;
+    font-weight:600; padding:8px 18px; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.secondary { background:transparent; color:var(--fg); border-color:var(--line); font-weight:400; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; }
+  .actions { display:flex; gap:10px; margin-top:14px; align-items:center; flex-wrap:wrap; }
+  canvas { border:1px solid var(--line); border-radius:6px; image-rendering:pixelated;
+    max-width:100%; background:var(--panel); }
+  table { border-collapse:collapse; font-size:13px; width:100%; }
+  th, td { text-align:left; padding:5px 10px 5px 0; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .mono { font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  .ok{color:var(--ok);} .bad{color:var(--bad);} .warn{color:var(--warn);} .muted{color:var(--muted);}
+  .note { font-size:12.5px; color:var(--muted); margin:8px 0 0; }
+  #status { font-variant-numeric:tabular-nums; }
+  textarea { width:100%; min-height:280px; font-family:ui-monospace, Menlo, monospace;
+    font-size:12px; resize:vertical; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Coverage extract</h1>
+<p class="sub">
+  Walks the five zooms still outstanding and prints exactly which tiles are
+  live. Four of them are irregular, so a bounding box over-claims — Hong Kong
+  by 15%. The fifth, DLR z20, was last measured while the CDN was refusing
+  requests and needs doing again properly.
+</p>
+
+<fieldset>
+  <legend>Pace</legend>
+  <div class="row">
+    <div>
+      <label for="rps">Requests/sec</label>
+      <input type="number" id="rps" value="12" min="1" max="60" style="width:100px">
+    </div>
+    <div>
+      <label for="conc">In flight at once</label>
+      <input type="number" id="conc" value="6" min="1" max="32" style="width:110px">
+    </div>
+    <div>
+      <label for="rest">Rest between zooms (s)</label>
+      <input type="number" id="rest" value="5" min="0" max="120" style="width:150px">
+    </div>
+  </div>
+  <div class="actions">
+    <button id="go">Run all five</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <span id="status" class="muted"></span>
+  </div>
+  <p class="note">
+    Deliberately gentler than the defaults elsewhere: the last DLR z20 attempt
+    returned nine tiles because the server started refusing, and a refusal is
+    indistinguishable from an absent tile here. Every zoom is audited afterwards
+    and retried if the audit fails, so leaving it alone is fine.
+    <br>
+    It comes to about 15,000 requests. Six in flight against a CDN answering in
+    roughly 0.7s is about 8–9 a second whatever the rate limit says, so reckon
+    on <b>half an hour</b>; DLR z20 is 8,000 of them on its own.
+  </p>
+</fieldset>
+
+<canvas id="map" width="600" height="200"></canvas>
+<p class="note" id="orient"></p>
+
+<h2>Progress</h2>
+<div class="scroll">
+  <table id="results">
+    <thead><tr>
+      <th>zoom</th><th>requests</th><th>box</th><th>tiles</th><th>groups</th><th>state</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<h2>Paste this back</h2>
+<textarea id="out" spellcheck="false" placeholder="Fills in as each zoom finishes."></textarea>
+<div class="actions">
+  <button id="copy" class="secondary" disabled>Copy</button>
+  <button id="save" class="secondary" disabled>Download .txt</button>
+</div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const CDN = "https://cdn6.parksmedia.wdprapps.disney.com/media/maps/prod";
+
+  // The five outstanding zooms, with the declared box each walk is anchored on.
+  // Margins are per-target: DLR z20 is known to run past its declared south
+  // edge, so it gets room to do so; the rest traced well inside theirs.
+  const TARGETS = [
+    { id: "dlr z20",  template: `${CDN}/disneyland/840388841/{z}/{x}/{y}.jpg`, z: 20,
+      declared: { minX: 180352, maxX: 181247, minY: 419328, maxY: 419739 }, margin: 64,
+      why: "last answer came back as 9 tiles while the CDN was refusing" },
+    { id: "hkdl z19", template: `${CDN}/hkdl/51/{z}/{x}/{y}.jpg`, z: 19,
+      declared: { minX: 428192, maxX: 428255, minY: 228752, maxY: 228815 }, margin: 16,
+      why: "irregular — 15% of its box is empty" },
+    { id: "hkdl z20", template: `${CDN}/hkdl/51/{z}/{x}/{y}.jpg`, z: 20,
+      declared: { minX: 856384, maxX: 856511, minY: 457504, maxY: 457631 }, margin: 16,
+      why: "irregular — 15% of its box is empty" },
+    { id: "dlp z18",  template: "https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg", z: 18,
+      declared: { minX: 132992, maxX: 133183, minY: 90112, maxY: 90239 }, margin: 16,
+      why: "irregular — bitten corner" },
+    { id: "dlp z19",  template: "https://media.disneylandparis.com/mapTiles/images/{z}/{x}/{y}.jpg", z: 19,
+      declared: { minX: 265984, maxX: 266367, minY: 180224, maxY: 180479 }, margin: 16,
+      why: "irregular — bitten corner" },
+  ];
+
+  const RING = [[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0]];
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+
+  let stopped = false, requests = 0, cache = new Map(), pending = new Map();
+  let limits = null, target = null;
+  const lines = [];
+
+  // -- pacing --------------------------------------------------------------
+
+  const width = () => Math.max(1, Math.min(32, +$("conc").value || 1));
+  let nextSlot = 0, inFlight = 0;
+  const queue = [];
+
+  async function gate() {
+    const gap = 1000 / Math.max(1, +$("rps").value || 12);
+    const wait = Math.max(0, nextSlot - performance.now());
+    nextSlot = performance.now() + wait + gap;
+    if (wait > 0) await sleep(wait);
+  }
+  async function slot() {
+    while (inFlight >= width()) await new Promise((r) => queue.push(r));
+    inFlight++;
+  }
+  function free() {
+    inFlight--;
+    const next = queue.shift();
+    if (next) next();
+  }
+  const inOrder = (jobs) => Promise.all(jobs.map((j) => j()));
+
+  // -- probing -------------------------------------------------------------
+
+  function url(x, y) {
+    return target.template
+      .replaceAll("{z}", target.z).replaceAll("{x}", x).replaceAll("{y}", y);
+  }
+
+  function probeRaw(u) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (v) => {
+        if (settled) return;
+        settled = true; clearTimeout(t);
+        img.onload = img.onerror = null; img.src = "";
+        resolve(v);
+      };
+      const t = setTimeout(() => done(false), 20000);
+      img.onload = () => done(img.naturalWidth > 0);
+      img.onerror = () => done(false);
+      img.src = u;
+    });
+  }
+
+  async function fetchTile(x, y) {
+    while (navigator.onLine === false && !stopped) {
+      $("status").textContent = "offline — waiting";
+      await sleep(5000);
+    }
+    if (stopped) return false;
+    await gate();
+    await slot();
+    requests++;
+    try { return await probeRaw(url(x, y)); } finally { free(); }
+  }
+
+  async function exists(x, y) {
+    if (x < limits.minX || x > limits.maxX || y < limits.minY || y > limits.maxY) return false;
+    const key = x + "," + y;
+    if (cache.has(key)) return cache.get(key);
+    if (pending.has(key)) return pending.get(key);   // join a request already out
+    if (stopped) return false;
+    const probe = fetchTile(x, y).then((got) => {
+      pending.delete(key);
+      cache.set(key, got);
+      paint(x, y, got ? "#22c55e" : "#dc2626");
+      if (requests % 20 === 0) tick();
+      return got;
+    });
+    pending.set(key, probe);
+    return probe;
+  }
+
+  // -- canvas --------------------------------------------------------------
+
+  let view = null;
+  function setupCanvas(b) {
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    const cell = Math.max(1, Math.min(8, Math.floor(880 / w)));
+    canvas.width = w * cell; canvas.height = h * cell;
+    ctx.fillStyle = "#6b7280"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    view = { cell, b };
+    $("orient").textContent = `${target.id}: searching ${w} × ${h} tiles`;
+  }
+  function paint(x, y, colour) {
+    if (!view) return;
+    const cx = (x - view.b.minX) * view.cell, cy = (y - view.b.minY) * view.cell;
+    if (cx < 0 || cy < 0 || cx >= canvas.width || cy >= canvas.height) return;
+    ctx.fillStyle = colour;
+    ctx.fillRect(cx, cy, view.cell, view.cell);
+  }
+
+  // -- the walk ------------------------------------------------------------
+
+  const ringIndex = (px, py, qx, qy) =>
+    RING.findIndex(([dx, dy]) => px + dx === qx && py + dy === qy);
+
+  async function traceFrom(seedX, seedY) {
+    let sx = seedX;
+    for (;;) {
+      const span = Math.min(width(), 16), xs = [];
+      for (let i = 1; i <= span; i++) xs.push(sx - i);
+      const got = await inOrder(xs.map((x) => () => exists(x, seedY)));
+      const gap = got.indexOf(false);
+      sx -= gap === -1 ? span : gap;
+      if (gap !== -1 || stopped) break;
+    }
+    let bx = sx - 1, by = seedY, px = sx, py = seedY;
+    const contour = [[sx, seedY]], filled = new Set([sx + "," + seedY]), seen = new Set();
+
+    for (let step = 0; step < 400000; step++) {
+      if (stopped) break;
+      const state = `${px},${py},${bx},${by}`;
+      if (seen.has(state)) break;
+      seen.add(state);
+
+      const start = ringIndex(px, py, bx, by), ring = [];
+      for (let k = 1; k <= 8; k++) {
+        const j = (start + k) % 8;
+        ring.push([j, px + RING[j][0], py + RING[j][1]]);
+      }
+      const look = Math.min(8, width());
+      let moved = false;
+      for (let base = 0; base < 8 && !moved; base += look) {
+        const slice = ring.slice(base, base + look);
+        const got = await inOrder(slice.map(([, cx, cy]) => () => exists(cx, cy)));
+        const hit = got.indexOf(true);
+        if (hit === -1) continue;
+        const [j, cx, cy] = slice[hit], prev = (j + 7) % 8;
+        bx = px + RING[prev][0]; by = py + RING[prev][1];
+        px = cx; py = cy;
+        contour.push([px, py]); filled.add(px + "," + py);
+        moved = true;
+      }
+      if (!moved) break;
+    }
+    return { contour, filled };
+  }
+
+  async function findSeed(b, done) {
+    const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
+    for (const count of [9, 49, 225, 900]) {
+      const side = Math.sqrt(count);
+      const sx = Math.max(1, Math.ceil(w / side)), sy = Math.max(1, Math.ceil(h / side));
+      let batch = [];
+      const drain = async () => {
+        if (!batch.length) return null;
+        const slice = batch; batch = [];
+        const got = await inOrder(slice.map(([x, y]) => () => exists(x, y)));
+        const hit = got.indexOf(true);
+        return hit === -1 ? null : slice[hit];
+      };
+      for (let y = b.minY; y <= b.maxY; y += sy) {
+        for (let x = b.minX; x <= b.maxX; x += sx) {
+          if (stopped) return null;
+          if (done.some((k) => x >= k.minX && x <= k.maxX && y >= k.minY && y <= k.maxY)) continue;
+          batch.push([x, y]);
+          if (batch.length >= width()) {
+            const found = await drain();
+            if (found) return found;
+          }
+        }
+      }
+      const found = await drain();
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // -- filling -------------------------------------------------------------
+
+  // Flood inward from outside the box: whatever the flood cannot reach is
+  // enclosed by the border. Not min/max per row, which would bridge the notch
+  // in an L and claim tiles that are not there.
+  function fillRegion(filled, box) {
+    const w = box.maxX - box.minX + 1, h = box.maxY - box.minY + 1;
+    const W = w + 2, H = h + 2;
+    const wall = new Uint8Array(W * H);
+    for (const key of filled) {
+      const [x, y] = key.split(",").map(Number);
+      wall[(y - box.minY + 1) * W + (x - box.minX + 1)] = 1;
+    }
+    const out = new Uint8Array(W * H), stack = [0];
+    out[0] = 1;
+    while (stack.length) {
+      const i = stack.pop(), cx = i % W, cy = (i / W) | 0;
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const j = ny * W + nx;
+        if (out[j] || wall[j]) continue;
+        out[j] = 1; stack.push(j);
+      }
+    }
+    const spans = [];
+    let count = 0;
+    for (let y = 0; y < h; y++) {
+      let run = -1;
+      for (let x = 0; x <= w; x++) {
+        const held = x < w && !out[(y + 1) * W + (x + 1)];
+        if (held && run === -1) run = x;
+        if (!held && run !== -1) {
+          spans.push([box.minY + y, box.minX + run, box.minX + x - 1]);
+          count += x - run;
+          run = -1;
+        }
+      }
+    }
+    return { spans, count };
+  }
+
+  function mergeSpans(lists) {
+    const byRow = new Map();
+    for (const list of lists) {
+      for (const [y, a, b] of list) {
+        if (!byRow.has(y)) byRow.set(y, []);
+        byRow.get(y).push([a, b]);
+      }
+    }
+    const spans = [];
+    let count = 0;
+    for (const y of [...byRow.keys()].sort((a, b) => a - b)) {
+      const runs = byRow.get(y).sort((p, q) => p[0] - q[0]);
+      let [from, to] = runs[0];
+      for (let i = 1; i < runs.length; i++) {
+        const [a, b] = runs[i];
+        if (a <= to + 1) to = Math.max(to, b);
+        else { spans.push([y, from, to]); count += to - from + 1; [from, to] = [a, b]; }
+      }
+      spans.push([y, from, to]); count += to - from + 1;
+    }
+    return { spans, count };
+  }
+
+  // Consecutive rows covered identically collapse into one line. These shapes
+  // are a handful of rectangles stacked up, so a 425-row footprint prints as
+  // two or three lines instead of 425.
+  function groupRows(spans) {
+    const byRow = new Map();
+    for (const [y, a, b] of spans) {
+      if (!byRow.has(y)) byRow.set(y, []);
+      byRow.get(y).push(`${a}-${b}`);
+    }
+    const ys = [...byRow.keys()].sort((a, b) => a - b);
+    const out = [];
+    let runStart = null, runEnd = null, sig = null;
+    const flush = () => {
+      if (runStart === null) return;
+      out.push(runStart === runEnd ? `  ${runStart}: ${sig}` : `  ${runStart}..${runEnd}: ${sig}`);
+    };
+    for (const y of ys) {
+      const s = byRow.get(y).join(" ");
+      if (sig === s && y === runEnd + 1) { runEnd = y; continue; }
+      flush();
+      runStart = runEnd = y; sig = s;
+    }
+    flush();
+    return out;
+  }
+
+  // -- auditing ------------------------------------------------------------
+
+  function spread(all, want) {
+    const n = Math.min(all.length, want);
+    if (!n) return [];
+    const step = all.length / n, out = [];
+    for (let i = 0; i < n; i++) out.push(all[Math.floor(i * step)]);
+    return out;
+  }
+
+  // A 403 and a 404 are the same event to an <img>, so a walk done while the
+  // server is refusing closes early around nothing and looks tidy doing it.
+  // Two questions settle it: do absences the border rests on answer on a
+  // second ask, and do tiles already served still serve? Either a yes to the
+  // first or a no to the second means the measurement is void.
+  async function audit(regions) {
+    const suspects = new Map(), known = [];
+    for (const g of regions) {
+      for (const key of g.filled) {
+        const [x, y] = key.split(",").map(Number);
+        known.push([x, y]);
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const k = (x + dx) + "," + (y + dy);
+          if (cache.get(k) === false) suspects.set(k, [x + dx, y + dy]);
+        }
+      }
+    }
+    if (!suspects.size) for (const [k, v] of cache) if (v === false) suspects.set(k, k.split(",").map(Number));
+
+    const probes = spread([...suspects.values()], 24);
+    const controls = spread(known, 12);
+    const [answered, alive] = await Promise.all([
+      inOrder(probes.map(([x, y]) => () => fetchTile(x, y))),
+      inOrder(controls.map(([x, y]) => () => fetchTile(x, y))),
+    ]);
+    return {
+      flipped: probes.filter((_, i) => answered[i]),
+      dead: controls.filter((_, i) => !alive[i]),
+    };
+  }
+
+  // -- one target ----------------------------------------------------------
+
+  function tick(extra) {
+    const bits = [target ? target.id : "", `${requests.toLocaleString()} requests`];
+    if (extra) bits.push(extra);
+    $("status").textContent = bits.filter(Boolean).join(" · ");
+  }
+
+  async function measure(t) {
+    target = t;
+    requests = 0; cache = new Map(); pending = new Map();
+    limits = {
+      minX: t.declared.minX - t.margin, maxX: t.declared.maxX + t.margin,
+      minY: t.declared.minY - t.margin, maxY: t.declared.maxY + t.margin,
+    };
+    setupCanvas(limits);
+
+    const regions = [], walked = [];
+    for (let attempt = 0; attempt < 40 && regions.length < 6; attempt++) {
+      if (stopped) break;
+      const seed = await findSeed(t.declared, walked);
+      if (!seed) break;
+      const { contour, filled } = await traceFrom(seed[0], seed[1]);
+      if (!contour.length) continue;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const [x, y] of contour) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      const box = { minX, maxX, minY, maxY };
+      walked.push(box);
+      const fill = fillRegion(filled, box);
+      for (const [y, a, b] of fill.spans) for (let x = a; x <= b; x++) paint(x, y, "#15803d");
+      for (const [x, y] of contour) paint(x, y, "#2563eb");
+      const clipped = [];
+      if (box.minX <= limits.minX) clipped.push("minX");
+      if (box.maxX >= limits.maxX) clipped.push("maxX");
+      if (box.minY <= limits.minY) clipped.push("minY");
+      if (box.maxY >= limits.maxY) clipped.push("maxY");
+      regions.push({ filled, box, spans: fill.spans, clipped });
+    }
+
+    if (stopped) return { state: "stopped" };
+    tick("auditing");
+    const { flipped, dead } = await audit(regions);
+    if (flipped.length) {
+      return { state: "unreliable",
+        detail: `${flipped.length} tile(s) called absent answered on a second ask (e.g. ${flipped[0]})` };
+    }
+    if (dead.length) {
+      return { state: "unreliable",
+        detail: `server stopped serving ${dead.length} tile(s) it had already served (e.g. ${dead[0]})` };
+    }
+    const cut = [...new Set(regions.flatMap((g) => g.clipped))];
+    if (cut.length) {
+      return { state: "clipped", detail: `reached the ${cut.join(" and ")} edge of the search window` };
+    }
+    if (!regions.length) return { state: "empty" };
+
+    const merged = mergeSpans(regions.map((g) => g.spans));
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const g of regions) {
+      minX = Math.min(minX, g.box.minX); maxX = Math.max(maxX, g.box.maxX);
+      minY = Math.min(minY, g.box.minY); maxY = Math.max(maxY, g.box.maxY);
+    }
+    return {
+      state: "ok",
+      box: { minX, maxX, minY, maxY },
+      tiles: merged.count,
+      regions: regions.length,
+      rows: groupRows(merged.spans),
+    };
+  }
+
+  // -- driving -------------------------------------------------------------
+
+  function addRow(t, r, requestCount) {
+    const tr = document.createElement("tr");
+    const cls = r.state === "ok" ? "ok" : (r.state === "empty" ? "muted" : "bad");
+    tr.innerHTML =
+      `<td>${t.id}</td><td>${requestCount.toLocaleString()}</td>` +
+      `<td class="mono">${r.box ? `${r.box.minX}-${r.box.maxX}, ${r.box.minY}-${r.box.maxY}` : "—"}</td>` +
+      `<td>${r.tiles ? r.tiles.toLocaleString() : "—"}</td>` +
+      `<td>${r.rows ? r.rows.length : "—"}</td>` +
+      `<td class="${cls}">${r.state}${r.detail ? " — " + r.detail : ""}</td>`;
+    $("results").tBodies[0].appendChild(tr);
+  }
+
+  function emit(t, r, requestCount) {
+    if (r.state === "ok") {
+      lines.push(
+        `${t.id}  OK  box ${r.box.minX}-${r.box.maxX}, ${r.box.minY}-${r.box.maxY}` +
+        `  tiles ${r.tiles}  regions ${r.regions}  requests ${requestCount}`);
+      lines.push(...r.rows);
+    } else {
+      lines.push(`${t.id}  ${r.state.toUpperCase()}${r.detail ? "  " + r.detail : ""}  requests ${requestCount}`);
+    }
+    lines.push("");
+    $("out").value = lines.join("\n");
+    $("copy").disabled = false; $("save").disabled = false;
+  }
+
+  async function run() {
+    stopped = false;
+    $("go").disabled = true; $("stop").disabled = false;
+    let wake = null;
+    try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch (e) {}
+
+    lines.length = 0;
+    lines.push(`tile coverage extract  ${new Date().toISOString()}`);
+    lines.push(`pace: ${$("conc").value} in flight, ${$("rps").value}/s`);
+    lines.push("rows are  y (or yFrom..yTo): xFrom-xTo [xFrom-xTo ...]  inclusive, server tile space");
+    lines.push("");
+    $("out").value = lines.join("\n");
+
+    const started = Date.now();
+    try {
+      for (let i = 0; i < TARGETS.length; i++) {
+        if (stopped) break;
+        const t = TARGETS[i];
+        let result = null, used = 0;
+        // Up to three goes, backing off and narrowing each time: an audit
+        // failure means the server was refusing, and the answer to that is to
+        // ask more slowly rather than to accept what it said.
+        for (let go = 1; go <= 3; go++) {
+          if (stopped) break;
+          $("status").textContent = `${t.id} · attempt ${go} of 3 · ${i + 1}/${TARGETS.length}`;
+          result = await measure(t);
+          used = requests;
+          if (result.state !== "unreliable" || stopped) break;
+          const pause = 60 * go;
+          for (let s = pause; s > 0 && !stopped; s--) {
+            $("status").textContent = `${t.id} · server refusing · waiting ${s}s, then slower`;
+            await sleep(1000);
+          }
+          $("conc").value = Math.max(1, Math.floor(width() / 2));
+          $("rps").value = Math.max(2, Math.floor((+$("rps").value || 12) / 2));
+        }
+        if (stopped) break;
+        addRow(t, result, used);
+        emit(t, result, used);
+        const rest = Math.max(0, +$("rest").value || 0);
+        if (rest && i < TARGETS.length - 1) {
+          for (let s = rest; s > 0 && !stopped; s--) {
+            $("status").textContent = `resting ${s}s before ${TARGETS[i + 1].id}`;
+            await sleep(1000);
+          }
+        }
+      }
+      const mins = Math.round((Date.now() - started) / 60000);
+      $("status").textContent = stopped ? "stopped" : `done in ${mins} min — copy the box below`;
+    } finally {
+      $("go").disabled = false; $("stop").disabled = true;
+      if (wake) wake.release().catch(() => {});
+    }
+  }
+
+  $("go").addEventListener("click", run);
+  $("stop").addEventListener("click", () => { stopped = true; $("status").textContent = "stopping…"; });
+  $("copy").addEventListener("click", () => {
+    $("out").select();
+    if (navigator.clipboard) navigator.clipboard.writeText($("out").value).catch(() => {});
+  });
+  $("save").addEventListener("click", () => {
+    const url = URL.createObjectURL(new Blob([$("out").value], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = "coverage-extract.txt"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  });
+})();
+</script>
+</body>
+</html>
