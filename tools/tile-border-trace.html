@@ -113,6 +113,7 @@
     <button id="run">Trace this zoom</button>
     <button id="runAll" class="secondary">Trace every zoom</button>
     <button id="runEverything" class="secondary">Check every map and zoom</button>
+    <button id="runUnresolved" class="secondary" disabled>Re-check unresolved rows</button>
     <button id="stop" class="secondary" disabled>Stop</button>
     <label class="inline"><input type="checkbox" id="wake" checked> keep the screen awake</label>
   </div>
@@ -132,6 +133,7 @@
   <span><span class="sw" style="background:#22c55e"></span>tile exists</span>
   <span><span class="sw" style="background:#dc2626"></span>no tile</span>
   <span><span class="sw" style="background:#2563eb"></span>border it walked</span>
+  <span><span class="sw" style="background:#15803d"></span>enclosed — taken as imagery, never probed</span>
   <span id="orient" class="muted"></span>
 </div>
 
@@ -139,7 +141,7 @@
 <div class="scroll">
   <table id="results">
     <thead><tr>
-      <th>map</th><th>zoom</th><th>requests</th><th>regions</th><th>border</th>
+      <th>map</th><th>zoom</th><th>requests</th><th>regions</th><th>border</th><th>covered</th>
       <th>declared box</th><th>traced box</th><th>shape</th>
     </tr></thead>
     <tbody></tbody>
@@ -149,6 +151,7 @@
 <div class="actions">
   <button id="copy" class="secondary" disabled>Copy results</button>
   <button id="download" class="secondary" disabled>Download .tsv</button>
+  <button id="downloadJson" class="secondary" disabled>Download coverage .json</button>
   <button id="clear" class="secondary" disabled>Clear results</button>
 </div>
 
@@ -524,6 +527,112 @@
     return { contour, filled };
   }
 
+  // Everything the border encloses is taken to be imagery. That is the whole
+  // bargain of tracing: the walk establishes where the edge is for the price of
+  // the perimeter, and probing the inside to confirm what the edge already
+  // implies would cost the area instead -- which is the cost tracing exists to
+  // avoid.
+  //
+  // Done by flooding inward from outside the box rather than by taking the
+  // min and max x on each row. On an L, a C or a bitten corner those are not
+  // the same answer: min/max would bridge the concavity and claim tiles that
+  // are not there. An 8-connected contour is watertight against a 4-connected
+  // flood, so whatever the flood cannot reach is genuinely enclosed.
+  function fillRegion(filled, box) {
+    const w = box.maxX - box.minX + 1, h = box.maxY - box.minY + 1;
+    const W = w + 2, H = h + 2;          // one cell of padding to flood from
+    const border = new Uint8Array(W * H);
+    for (const key of filled) {
+      const [x, y] = key.split(",").map(Number);
+      border[(y - box.minY + 1) * W + (x - box.minX + 1)] = 1;
+    }
+
+    const outside = new Uint8Array(W * H);
+    const stack = [0];
+    outside[0] = 1;
+    while (stack.length) {
+      const i = stack.pop();
+      const cx = i % W, cy = (i / W) | 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const j = ny * W + nx;
+        if (outside[j] || border[j]) continue;
+        outside[j] = 1;
+        stack.push(j);
+      }
+    }
+
+    // Runs of enclosed tiles, row by row: [y, xFrom, xTo] inclusive. A row can
+    // contribute several, which is the point of flooding rather than spanning.
+    const spans = [];
+    let count = 0;
+    for (let y = 0; y < h; y++) {
+      let run = -1;
+      for (let x = 0; x <= w; x++) {
+        const held = x < w && !outside[(y + 1) * W + (x + 1)];
+        if (held && run === -1) run = x;
+        if (!held && run !== -1) {
+          spans.push([box.minY + y, box.minX + run, box.minX + x - 1]);
+          count += x - run;
+          run = -1;
+        }
+      }
+    }
+    return { spans, count };
+  }
+
+  // Interior first, then the contour back over the top of it -- the spans
+  // include the border tiles, and the border is the part worth seeing.
+  // Regions can enclose the same ground twice. A shape with a hole in it gets
+  // walked from both sides -- the outer rim, and the rim of the hole, whichever
+  // a seed lands next to first -- and adding up what each encloses counts the
+  // overlap twice. The union is the only figure that means anything: it is the
+  // set of tiles an archive of this zoom would hold.
+  function mergeSpans(lists) {
+    const byRow = new Map();
+    for (const list of lists) {
+      for (const [y, x0, x1] of list) {
+        if (!byRow.has(y)) byRow.set(y, []);
+        byRow.get(y).push([x0, x1]);
+      }
+    }
+    const spans = [];
+    let count = 0;
+    for (const y of [...byRow.keys()].sort((a, b) => a - b)) {
+      const runs = byRow.get(y).sort((a, b) => a[0] - b[0]);
+      let [from, to] = runs[0];
+      for (let i = 1; i < runs.length; i++) {
+        const [a, b] = runs[i];
+        if (a <= to + 1) {
+          to = Math.max(to, b);         // touching or overlapping: one run
+        } else {
+          spans.push([y, from, to]); count += to - from + 1;
+          [from, to] = [a, b];
+        }
+      }
+      spans.push([y, from, to]); count += to - from + 1;
+    }
+    return { spans, count };
+  }
+
+  //: Regions whose box sits wholly inside another's. Either the rim of a hole
+  //  or an island in one -- the border alone cannot tell which, and telling
+  //  them apart means probing the inside, which is what tracing avoids. Worth
+  //  saying out loud, because the fill claims the ground either way.
+  function nestedCount(regions) {
+    return regions.filter((g, i) => regions.some((h, j) =>
+      i !== j && g.box.minX >= h.box.minX && g.box.maxX <= h.box.maxX
+              && g.box.minY >= h.box.minY && g.box.maxY <= h.box.maxY)).length;
+  }
+
+  function paintFill(spans, contour) {
+    for (const [y, x0, x1] of spans) {
+      for (let x = x0; x <= x1; x++) paint(x, y, "#15803d");
+    }
+    for (const [x, y] of contour) paint(x, y, "#2563eb");
+  }
+
   function boxOf(points) {
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const [x, y] of points) {
@@ -620,12 +729,14 @@
     return edges;
   }
 
-  async function runZoom(z, declared) {
+  async function runZoom(z, declared, marginOverride) {
     zoom = z;
     requests = 0; capped = false; cache = new Map(); pending = new Map();
     // Allow the walk a margin outside the declared box, so a border that runs
     // beyond it is visible rather than silently clipped.
-    const margin = Math.max(0, +$("margin").value || 0);
+    const margin = marginOverride != null
+      ? marginOverride
+      : Math.max(0, +$("margin").value || 0);
     limits = {
       minX: declared.minX - margin, maxX: declared.maxX + margin,
       minY: declared.minY - margin, maxY: declared.maxY + margin,
@@ -661,7 +772,15 @@
       const key = `${box.minX},${box.maxX},${box.minY},${box.maxY},${filled.size}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      regions.push({ contour, filled, box, clipped: clippedEdges(box), ...isRectangle(filled, box) });
+      const fill = fillRegion(filled, box);
+      paintFill(fill.spans, contour);
+      regions.push({
+        contour, filled, box,
+        clipped: clippedEdges(box),
+        spans: fill.spans,
+        covered: fill.count,
+        ...isRectangle(filled, box),
+      });
     }
 
     return { z, declared, regions, requests, capped, margin };
@@ -685,7 +804,13 @@
     }
 
     const parts = [];
-    if (r.regions.length > 1) parts.push(`${r.regions.length} separate regions`);
+    const nested = nestedCount(r.regions);
+    if (r.regions.length > 1) {
+      parts.push(nested
+        ? `${r.regions.length} borders, ${nested} inside another — a hole or an island, `
+          + `and the fill claims it either way`
+        : `${r.regions.length} separate regions`);
+    }
     const bad = r.regions.filter((g) => !g.rectangle);
     if (!bad.length) {
       parts.push(r.regions.length > 1 ? "each a rectangle" : "a rectangle");
@@ -728,46 +853,127 @@
     tr.innerHTML =
       `<td>${row.map}</td><td>${row.z}</td><td>${row.requests.toLocaleString()}</td>` +
       `<td>${row.regions}</td><td>${row.border.toLocaleString()}</td>` +
+      `<td>${(row.covered || 0).toLocaleString()}</td>` +
       `<td class="mono">${row.declared}</td><td class="mono">${row.traced}</td>` +
       `<td class="${row.cls}">${row.text}</td>`;
     $("results").tBodies[0].appendChild(tr);
   }
 
-  function addRow(mapLabel, r) {
+  function redrawRows() {
+    $("results").tBodies[0].innerHTML = "";
+    for (const row of rows) renderRow(row);
+  }
+
+  function buildRow(parkId, mapLabel, r) {
     const { text, cls } = describe(r);
     const all = r.regions.flatMap((g) => g.contour);
-    const row = {
+    const merged = mergeSpans(r.regions.map((g) => g.spans));
+    const plain = r.regions.every((g) => g.rectangle && !g.clipped.length);
+    return {
+      parkId,
       map: mapLabel,
       z: r.z,
       requests: r.requests,
       regions: r.regions.length,
       border: r.regions.reduce((n, g) => n + g.filled.size, 0),
+      //: Tiles the traced border encloses -- what an archive of this zoom
+      //  actually contains, as against the box that merely bounds it.
+      covered: merged.count,
       declared: boxText(r.declared),
       traced: boxText(all.length ? boxOf(all) : null),
+      // Only worth keeping where the box does not already say it. A single
+      // rectangle is fully described by its corners and the runs are bulk.
+      spans: plain && r.regions.length <= 1 ? null : merged.spans,
+      clean: isCleanResult(r),
       text, cls,
       at: new Date().toISOString(),
     };
+  }
+
+  //: A zoom is settled when the walk finished inside its window, stayed under
+  //  the cap, found something, and what it found was rectangular. Anything
+  //  else is a row to come back to.
+  function isCleanResult(r) {
+    return r.regions.length > 0
+      && !r.capped
+      && r.regions.every((g) => g.rectangle && !g.clipped.length);
+  }
+
+  function addRow(parkId, mapLabel, r) {
+    const row = buildRow(parkId, mapLabel, r);
     rows.push(row);
     renderRow(row);
     saveRows();
     refreshResultButtons();
   }
 
+  // Re-measuring an existing zoom replaces it. Appending would leave the table
+  // holding two answers for one question, and the stale one indistinguishable
+  // from the fresh one at a glance.
+  function replaceRow(parkId, mapLabel, r) {
+    const row = buildRow(parkId, mapLabel, r);
+    const at = rows.findIndex((x) => x.map === mapLabel && +x.z === +r.z);
+    if (at === -1) rows.push(row); else rows[at] = row;
+    redrawRows();
+    saveRows();
+    refreshResultButtons();
+  }
+
   function tsv() {
-    const head = ["map", "zoom", "requests", "regions", "border tiles",
+    const head = ["map", "zoom", "requests", "regions", "border tiles", "covered tiles",
                   "declared box", "traced box", "shape", "checked at"];
     const body = rows.map((r) => [
-      r.map, "z" + r.z, r.requests, r.regions, r.border,
+      r.map, "z" + r.z, r.requests, r.regions, r.border, r.covered || 0,
       r.declared, r.traced, r.text, r.at,
     ].join("\t"));
     return [head.join("\t")].concat(body).join("\n");
+  }
+
+  // The machine-readable form. A rectangle needs only its box; anything else
+  // carries the runs the border encloses, so a downloader can enumerate an
+  // irregular footprint without having to rediscover its shape.
+  function coverageJson() {
+    const maps = {};
+    for (const r of rows) {
+      const id = r.parkId || (PARKS.find((p) => p.label === r.map) || {}).id || r.map;
+      const box = r.traced === "—" ? null : (() => {
+        const [xs, ys] = r.traced.split(", ");
+        const [minX, maxX] = xs.split("-").map(Number);
+        const [minY, maxY] = ys.split("-").map(Number);
+        return { minX, maxX, minY, maxY };
+      })();
+      (maps[id] = maps[id] || {})[r.z] = {
+        box,
+        tiles: r.covered || 0,
+        rectangle: !!r.clean,
+        verdict: r.text,
+        checkedAt: r.at,
+        ...(r.spans ? { spans: r.spans } : {}),
+      };
+    }
+    return JSON.stringify({
+      tool: "tile-border-trace",
+      generated: new Date().toISOString(),
+      note: "spans are [y, xFrom, xTo] inclusive, in server tile space, merged "
+          + "across regions so they never overlap. Present only where the box "
+          + "alone does not describe the coverage; a single rectangle is fully "
+          + "described by its box. Everything a traced border encloses is taken "
+          + "to be imagery and was not probed.",
+      maps,
+    }, null, 2);
   }
 
   function refreshResultButtons() {
     const empty = rows.length === 0;
     $("copy").disabled = empty;
     $("download").disabled = empty;
+    $("downloadJson").disabled = empty;
     $("clear").disabled = empty;
+    const open = running ? 0 : unresolved().length;
+    $("runUnresolved").disabled = running || open === 0;
+    $("runUnresolved").textContent = open
+      ? `Re-check ${open} unresolved row${open === 1 ? "" : "s"}`
+      : "Re-check unresolved rows";
   }
 
   // -- cost estimate ------------------------------------------------------
@@ -845,6 +1051,7 @@
     running = on;
     $("run").disabled = on; $("runAll").disabled = on; $("runEverything").disabled = on;
     $("stop").disabled = !on;
+    refreshResultButtons();
   }
 
   function parseBounds() {
@@ -879,8 +1086,8 @@
     updateEstimate();
   }
 
-  async function runSeries(mapLabel, zooms, bounds) {
-    state.park = mapLabel;
+  async function runSeries(park, zooms, bounds) {
+    state.park = park.label;
     state.zoomCount = zooms.length;
     for (let i = 0; i < zooms.length; i++) {
       if (stopped) break;
@@ -888,9 +1095,26 @@
       if (!declared) continue;
       state.z = zooms[i]; state.zoomIndex = i + 1;
       requests = 0; tick();
-      addRow(mapLabel, await runZoom(zooms[i], declared));
+      addRow(park.id, park.label, await runZoom(zooms[i], declared));
       state.done += requests;
     }
+  }
+
+  // A clipped walk measured the window, not the map, so the only useful
+  // response is to open the window and ask again. Widening by four each time
+  // gets from 8 to 512 in three goes, which covers everything seen so far
+  // without turning a wrong guess into a long crawl.
+  async function measureWidening(z, declared) {
+    let margin = Math.max(0, +$("margin").value || 0);
+    let result = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      result = await runZoom(z, declared, margin);
+      const clipped = result.regions.some((g) => g.clipped.length);
+      if (!clipped || stopped || capped) return result;
+      margin = Math.max(32, margin * 4);
+      tick(`clipped at margin ${result.margin} — retrying at ${margin}`);
+    }
+    return result;
   }
 
   //: The subset of a bounds object covering just the zooms about to be run,
@@ -906,9 +1130,50 @@
     state.mapIndex = 1; state.mapCount = 1; state.started = Date.now();
     state.planned = estimate(subset(bounds, zooms)); state.done = 0; totalRequests = 0;
     try {
-      await runSeries(park.label, zooms, bounds);
+      await runSeries(park, zooms, bounds);
       tick(stopped ? "stopped" : "done");
     } finally { busy(false); releaseWake(); }
+  }
+
+  //: Rows worth going back to. `clean` is recorded from now on; rows saved
+  //  before it existed are judged from the verdict they carry.
+  const settled = (r) => typeof r.clean === "boolean"
+    ? r.clean
+    : /^(a rectangle|\d+ separate regions, each a rectangle)$/.test(r.text);
+
+  function unresolved() {
+    return rows
+      .map((r, i) => ({ r, i, park: PARKS.find((p) => p.id === r.parkId || p.label === r.map) }))
+      .filter((x) => !settled(x.r) && x.park);
+  }
+
+  // Re-measure only what is unsettled. Everything already traced to a clean
+  // rectangle is done -- its box says all there is to say -- so re-walking it
+  // would spend hours confirming what the last run established.
+  async function goUnresolved() {
+    const todo = unresolved();
+    if (!todo.length) {
+      $("status").textContent = "nothing unresolved — every row traced to a rectangle";
+      return;
+    }
+    stopped = false; busy(true); await acquireWake();
+    state.mapCount = 0; state.started = Date.now();
+    state.planned = todo.reduce(
+      (n, x) => n + estimate({ [x.r.z]: x.park.bounds[x.r.z] }), 0);
+    state.done = 0; totalRequests = 0;
+    try {
+      for (let i = 0; i < todo.length; i++) {
+        if (stopped) break;
+        const { r, park } = todo[i];
+        applyPark(park);
+        state.park = park.label; state.z = r.z;
+        state.zoomIndex = i + 1; state.zoomCount = todo.length;
+        requests = 0; tick();
+        replaceRow(park.id, park.label, await measureWidening(+r.z, park.bounds[r.z]));
+        state.done += requests;
+      }
+      tick(stopped ? "stopped" : `done — re-measured ${todo.length} zoom(s)`);
+    } finally { busy(false); releaseWake(); state.zoomCount = 0; }
   }
 
   // Every map, every zoom -- the overnight run.
@@ -926,7 +1191,7 @@
         // of what is being checked right now.
         applyPark(PARKS[i]);
         const zooms = Object.keys(PARKS[i].bounds).map(Number).sort((a, b) => a - b);
-        await runSeries(PARKS[i].label, zooms, PARKS[i].bounds);
+        await runSeries(PARKS[i], zooms, PARKS[i].bounds);
       }
       tick(stopped ? "stopped" : `done — all ${PARKS.length} maps`);
     } finally { busy(false); releaseWake(); state.mapCount = 0; }
@@ -990,6 +1255,7 @@
     if (b) go(Object.keys(b).map(Number).sort((x, y) => x - y));
   });
   $("runEverything").addEventListener("click", goEverything);
+  $("runUnresolved").addEventListener("click", goUnresolved);
   $("stop").addEventListener("click", () => { stopped = true; tick("stopping…"); });
 
   $("copy").addEventListener("click", () => {
@@ -997,14 +1263,19 @@
     $("summary").hidden = false; $("summary").textContent = text;
     if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   });
-  $("download").addEventListener("click", () => {
-    const url = URL.createObjectURL(new Blob([tsv()], { type: "text/tab-separated-values" }));
+  function saveAs(text, type, name) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = `tile-border-trace-${new Date().toISOString().slice(0, 10)}.tsv`;
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
-  });
+  }
+  const stamp = () => new Date().toISOString().slice(0, 10);
+  $("download").addEventListener("click", () =>
+    saveAs(tsv(), "text/tab-separated-values", `tile-border-trace-${stamp()}.tsv`));
+  $("downloadJson").addEventListener("click", () =>
+    saveAs(coverageJson(), "application/json", `tile-coverage-${stamp()}.json`));
   $("clear").addEventListener("click", () => {
     rows = [];
     $("results").tBodies[0].innerHTML = "";
