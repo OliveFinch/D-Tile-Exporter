@@ -65,8 +65,9 @@
  *     }
  *
  * Either way `env` needs the same CloudFront values the tile proxy already
- * uses: `CF_POLICY`, `CF_SIGNATURE`, `CF_KEY_PAIR_ID`, optionally
- * `TDR_ORIGIN_BASE`, `TDR_USER_AGENT`, `TDR_REFERER`.
+ * uses: `CF_POLICY`, `CF_SIGNATURE`, `CF_KEY_PAIR_ID`. Optionally
+ * `TDR_ORIGIN_BASE`, `TDR_USER_AGENT`, `TDR_REFERER` — all three default to
+ * what the origin expects, including the mobile-app User-Agent it checks for.
  *
  * ## EXISTS_TOKEN
  *
@@ -85,6 +86,10 @@ export const MAX_TILES_PER_CALL = 48;
 const DEFAULT_ORIGIN_BASE =
   "https://contents-portal.tokyodisneyresort.jp/limited/map-image/{serverId}/{mode}/";
 const DEFAULT_REFERER = "https://www.tokyodisneyresort.jp/";
+// The origin checks this. A generic User-Agent gets 403 on every tile, which
+// this endpoint would faithfully report as "refused" for the whole map -- true,
+// and useless. Overridable with TDR_USER_AGENT.
+const DEFAULT_USER_AGENT = "TokyoDisneyResortApp/3.11.8 Android/14 sdk_gphone64_arm64";
 const MODES = new Set(["daytime", "nighttime"]);
 
 const json = (body, status = 200) =>
@@ -175,7 +180,7 @@ export async function handleExists(request, env) {
     .replace(/\/?$/, "/");
   const headers = {
     Cookie: cookies.map(([name, value]) => `${name}=${value}`).join("; "),
-    "User-Agent": env.TDR_USER_AGENT || "MagicParksExplorer/exists",
+    "User-Agent": env.TDR_USER_AGENT || DEFAULT_USER_AGENT,
     Referer: env.TDR_REFERER || DEFAULT_REFERER,
     Accept: "image/*,*/*;q=0.8",
     // Existence, not imagery. Servers that ignore Range send the whole tile,
