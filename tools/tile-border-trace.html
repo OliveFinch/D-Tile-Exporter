@@ -866,6 +866,8 @@
       // rectangle it is exactly the box, so it can be recovered for free.
       // Anything else genuinely is not known, and is left open to re-check
       // rather than filled in with a guess.
+      // An empty zoom is a finished answer with nothing to backfill.
+      if (out.clean === undefined && out.text === "no imagery found") out.clean = true;
       if (!out.covered && out.traced && out.traced !== "—" && out.text === "a rectangle") {
         const [xs, ys] = out.traced.split(", ");
         const [minX, maxX] = xs.split("-").map(Number);
@@ -926,13 +928,18 @@
     };
   }
 
-  //: A zoom is settled when the walk finished inside its window, stayed under
-  //  the cap, found something, and what it found was rectangular. Anything
-  //  else is a row to come back to.
+  //: A zoom is settled when the search ran to completion and the answer it
+  //  reached does not depend on a limit that was hit.
+  //
+  //  "Nothing here" is one of those answers. A seed search that swept the
+  //  declared box within budget and found no imagery has established that the
+  //  zoom is empty -- that is a measurement, not a failure to measure, and
+  //  offering it back for re-checking asks someone to keep confirming a
+  //  finished result.
   function isCleanResult(r) {
-    return r.regions.length > 0
-      && !r.capped
-      && r.regions.every((g) => g.rectangle && !g.clipped.length);
+    if (r.capped) return false;              // ran out of budget: answer unknown
+    if (!r.regions.length) return true;      // searched, and there is nothing
+    return r.regions.every((g) => g.rectangle && !g.clipped.length);
   }
 
   //: One row per map and zoom, always. A map and a zoom is a question with one
@@ -1177,7 +1184,7 @@
   //  before it existed are judged from the verdict they carry.
   const settled = (r) => typeof r.clean === "boolean"
     ? r.clean
-    : /^(a rectangle|\d+ separate regions, each a rectangle)$/.test(r.text);
+    : /^(a rectangle|no imagery found|\d+ separate regions, each a rectangle)$/.test(r.text);
 
   function unresolved() {
     return rows
