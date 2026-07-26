@@ -91,6 +91,10 @@
       <label for="parts">Max separate regions</label>
       <input type="number" id="parts" value="6" min="1" max="20" style="width:130px">
     </div>
+    <div>
+      <label for="margin">Search margin</label>
+      <input type="number" id="margin" value="8" min="0" max="512" style="width:110px">
+    </div>
   </div>
 </fieldset>
 
@@ -496,12 +500,25 @@
     return null;
   }
 
+  // Which sides of the search window a traced region is pressed up against.
+  // A border that reaches the window has not been measured -- it has been cut
+  // off -- and the straight line it leaves behind is the window's edge, not the
+  // map's. Reporting on the shape of that would be reporting on the window.
+  function clippedEdges(box) {
+    const edges = [];
+    if (box.minX <= limits.minX) edges.push("minX");
+    if (box.maxX >= limits.maxX) edges.push("maxX");
+    if (box.minY <= limits.minY) edges.push("minY");
+    if (box.maxY >= limits.maxY) edges.push("maxY");
+    return edges;
+  }
+
   async function runZoom(z, declared) {
     zoom = z;
     requests = 0; capped = false; cache = new Map();
     // Allow the walk a margin outside the declared box, so a border that runs
     // beyond it is visible rather than silently clipped.
-    const margin = 8;
+    const margin = Math.max(0, +$("margin").value || 0);
     limits = {
       minX: declared.minX - margin, maxX: declared.maxX + margin,
       minY: declared.minY - margin, maxY: declared.maxY + margin,
@@ -537,14 +554,29 @@
       const key = `${box.minX},${box.maxX},${box.minY},${box.maxY},${filled.size}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      regions.push({ contour, filled, box, ...isRectangle(filled, box) });
+      regions.push({ contour, filled, box, clipped: clippedEdges(box), ...isRectangle(filled, box) });
     }
 
-    return { z, declared, regions, requests, capped };
+    return { z, declared, regions, requests, capped, margin };
   }
 
   function describe(r) {
     if (!r.regions.length) return { text: "no imagery found", cls: "bad" };
+
+    // Say this first and say nothing else. A clipped walk cannot be called a
+    // rectangle or not one, and the traced box is a lower bound rather than a
+    // measurement -- treating it as either is how a truncated run gets filed
+    // as a finished one.
+    const cut = [...new Set(r.regions.flatMap((g) => g.clipped))];
+    if (cut.length) {
+      return {
+        text: `reached the ${cut.join(" and ")} edge of the search window — `
+            + `imagery runs past it, so this box is a floor, not a measurement; `
+            + `re-run with a margin above ${r.margin}`,
+        cls: "bad",
+      };
+    }
+
     const parts = [];
     if (r.regions.length > 1) parts.push(`${r.regions.length} separate regions`);
     const bad = r.regions.filter((g) => !g.rectangle);
