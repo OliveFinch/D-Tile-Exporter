@@ -100,8 +100,8 @@
       <input type="number" id="margin" value="8" min="0" max="512" style="width:110px">
     </div>
     <div>
-      <label for="extra">Probes hunting more regions</label>
-      <input type="number" id="extra" value="150" min="0" max="5000" style="width:180px">
+      <label for="extra">Probes hunting more regions (0 = stop at the first)</label>
+      <input type="number" id="extra" value="0" min="0" max="5000" style="width:250px">
     </div>
   </div>
 </fieldset>
@@ -128,6 +128,15 @@
     kept in this browser, so a refresh or a crash does not lose the night's work.
     If the network drops the run pauses rather than recording the whole map as
     missing.
+  </p>
+  <p class="note">
+    By default a zoom finishes as soon as its border closes. Proving no
+    <em>other</em> piece of map exists means sweeping the declared box, which on a
+    map far smaller than its declared bounds costs more than the walk did and
+    turns the picture red. The cost of stopping is that a detached piece would go
+    unreported — raise “probes hunting more regions” where that is possible. A
+    hole <em>inside</em> the map is handled either way: the walk detects when it
+    has traced a hole's rim rather than the outside, and crosses it.
   </p>
 </fieldset>
 
@@ -507,13 +516,71 @@
   // around it starting from the empty tile we arrived from, take the first
   // filled neighbour, and repeat. Jacob's criterion stops it: the same
   // (tile, arrived-from) pair means the loop has closed.
+  // Which way round a closed contour was walked, by the shoelace formula.
+  //
+  // With this ring order an outer boundary comes out positive and the rim of a
+  // hole comes out negative, and that distinction is worth having for free.
+  // Walking west from a seed stops at the first empty tile, which is the map's
+  // west edge if the seed can see it -- but if a hole lies between them it stops
+  // at the hole instead, and the walk then faithfully traces the hole's rim and
+  // reports a fragment as the whole map. That is how a 522-tile donut comes back
+  // as 106 tiles, tidily, with nothing obviously wrong.
+  function windingArea(contour) {
+    let area = 0;
+    for (let i = 0; i < contour.length; i++) {
+      const [x1, y1] = contour[i];
+      const [x2, y2] = contour[(i + 1) % contour.length];
+      area += x1 * y2 - x2 * y1;
+    }
+    return area / 2;
+  }
+
   async function traceFrom(seedX, seedY) {
+    let sx = seedX, sy = seedY;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      sx = await westEdge(sx, sy);
+      const walked = await moore(sx, sy);
+      // Positive: we found the outside of something. Done.
+      if (stopped || capped || windingArea(walked.contour) >= 0) return walked;
+      // Negative: that was the inside of a hole, so the map carries on west of
+      // it. Step across the gap and look for the real edge from there.
+      const beyond = await crossGap(sx - 1, sy);
+      if (beyond === null) return walked;
+      sx = beyond;
+    }
+    return await moore(await westEdge(sx, sy), sy);
+  }
+
+  //: The first tile west of an empty run, or null if the run reaches the window.
+  async function crossGap(x, y) {
+    while (x > limits.minX) {
+      const span = Math.min(width(), 16);
+      const xs = [];
+      for (let i = 0; i < span; i++) xs.push(x - i);
+      const got = await inOrder(xs.map((cx) => () => exists(cx, y)));
+      const hit = got.indexOf(true);
+      if (hit !== -1) return xs[hit];
+      if (stopped || capped) return null;
+      x -= span;
+    }
+    return null;
+  }
+
+  async function westEdge(seedX, seedY) {
     // Walk west until the next tile west is empty -- that is a border tile,
     // and starting anywhere else risks tracing off in the wrong direction.
     // Asked a run at a time rather than a hop at a time; the tiles past the
     // edge cost one batch and land in the cache the walk is about to use.
     let sx = seedX, sy = seedY;
     for (;;) {
+      // Ask about the immediate neighbour on its own first. A seed landing on
+      // or near the west edge is the common case -- the lattice scans west to
+      // east -- and firing a whole batch westward to discover that costs a
+      // dozen probes into empty space for every region traced. That is the
+      // line of red running off the left of the picture.
+      if (!(await exists(sx - 1, sy))) break;
+      sx -= 1;
+      if (stopped || capped) break;
       const span = Math.min(width(), 16);
       const xs = [];
       for (let i = 1; i <= span; i++) xs.push(sx - i);
@@ -522,6 +589,10 @@
       sx -= gap === -1 ? span : gap;
       if (gap !== -1 || stopped || capped) break;
     }
+    return sx;
+  }
+
+  async function moore(sx, sy) {
     let bx = sx - 1, by = sy;
 
     const contour = [[sx, sy]];
@@ -875,15 +946,20 @@
     // for free -- every tile is cached by then -- so the duplicate check below
     // costs nothing but still needs a budget to run in.
     // Finding the map at all is worth any number of probes -- without a seed
-    // there is nothing to report. Proving that nothing *else* is out there is
-    // not: on a map whose declared box is far bigger than its imagery, that
-    // sweep costs more than the walk it follows, and every probe lands on empty
-    // ground. So the first seed hunts without limit and later ones get a
-    // budget, after which the zoom is called done.
+    // there is nothing to report. Hunting for a *second* region is not, and by
+    // default it no longer happens: the walk closes, the zoom is done, on to
+    // the next.
     //
-    // It was never a guarantee -- a region smaller than the finest lattice was
-    // always missable -- so this trades a weaker version of an assurance that
-    // was already partial for a large part of the cost.
+    // Defaulting it off rather than merely cheap, because a budget did not
+    // actually solve this. On a small declared box the whole sweep fits inside
+    // any sane budget, so the limit never binds and every zoom still pays to
+    // fill its box with red. Off is the only setting that reliably stops.
+    //
+    // What it costs: a piece of map detached from the main body goes
+    // unreported. Set a budget above zero where that is a real possibility.
+    // Across all five public maps, every zoom of every one came back as a
+    // single region -- and the sweep was never a guarantee anyway, since a
+    // region smaller than the finest lattice could always slip through it.
     const extra = Math.max(0, +$("extra").value || 0);
 
     for (let attempt = 0; attempt < maxParts * 50 && regions.length < maxParts; attempt++) {
