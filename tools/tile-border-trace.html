@@ -266,6 +266,44 @@
     },
   ];
 
+  // Tokyo Disney Resort, through the viewer's own tile proxy. Its tiles need
+  // signed CloudFront cookies, which an <img> cannot carry -- but the proxy
+  // already holds them, and hands back plain image bytes at a plain URL. So
+  // from here TDR looks like any other park.
+  //
+  // Two things to know. The proxy answers 204 with an empty body both for a
+  // tile that is not there and for an upstream refusal, so the two are
+  // indistinguishable -- which is what the audit at the end of every zoom is
+  // for. And every probe spends one request of the Worker's daily quota,
+  // shared with live viewer traffic, so a both-modes sweep is not free.
+  const TDR_PROXY =
+    "https://wdw-magic-explorer-api.gullet-erase2v.workers.dev/tdr-tiles/z{z}/{x}_{y}.jpg?mode={code}";
+  const TDR_BOUNDS = {
+    "15": { minX: 29115, maxX: 29125, minY: 12905, maxY: 12915 },
+    "16": { minX: 58230, maxX: 58250, minY: 25810, maxY: 25830 },
+    "17": { minX: 116460, maxX: 116500, minY: 51620, maxY: 51660 },
+    "18": { minX: 232920, maxX: 233000, minY: 103240, maxY: 103320 },
+    "19": { minX: 465840, maxX: 466000, minY: 206480, maxY: 206640 },
+    "20": { minX: 931680, maxX: 932000, minY: 412960, maxY: 413280 },
+  };
+  for (const mode of ["daytime", "nighttime"]) {
+    PARKS.push({
+      id: `tdr-${mode}`,
+      label: `Tokyo Disney Resort (${mode})`,
+      template: TDR_PROXY,
+      code: mode,
+      codeLabel: mode,
+      scheme: "xyz",
+      note:
+        "Routed through your own Worker, so no credentials are needed here — the "
+        + "version box carries the mode, not a version code. The proxy returns 204 "
+        + "for a missing tile and for an upstream refusal alike, so a stale-cookie "
+        + "run would look like an empty map; the audit after each zoom is what "
+        + "catches that. Every probe costs one Worker request.",
+      bounds: TDR_BOUNDS,
+    });
+  }
+
   const CUSTOM = { id: "custom", label: "Custom", scheme: "xyz", note: "" };
 
   const $ = (id) => document.getElementById(id);
@@ -1248,6 +1286,7 @@
   async function runSeries(park, zooms, bounds) {
     state.park = park.label;
     state.zoomCount = zooms.length;
+    const written = [];
     for (let i = 0; i < zooms.length; i++) {
       if (stopped) break;
       const declared = bounds[zooms[i]];
@@ -1255,8 +1294,36 @@
       state.z = zooms[i]; state.zoomIndex = i + 1;
       requests = 0; tick();
       addRow(park.id, park.label, await runZoom(zooms[i], declared));
+      written.push(zooms[i]);
       state.done += requests;
     }
+    if (!stopped) flagIfEntirelyEmpty(park, written);
+  }
+
+  // A zoom that finds nothing has no tile to use as a control, so on its own it
+  // cannot tell "there is no imagery here" from "nothing answered". Usually the
+  // rest of the map settles it: if any zoom returned tiles, the source is up and
+  // an empty zoom is genuinely empty. If *every* zoom came back empty, that is
+  // not a map, that is an outage -- a dead proxy, or credentials that expired.
+  //
+  // The same reasoning as the downloader's everything-is-missing check, and the
+  // same failure it exists to stop: a run that completes tidily, reports no
+  // errors, and records a park as having no tiles in it.
+  function flagIfEntirelyEmpty(park, zooms) {
+    if (zooms.length < 2) return;         // too little to conclude anything from
+    const mine = rows.filter((r) => zooms.some((z) => +r.z === +z)
+      && (r.parkId ? r.parkId === park.id : r.map === park.label));
+    if (mine.length < 2 || mine.some((r) => (r.covered || 0) > 0)) return;
+    for (const row of mine) {
+      row.clean = false;
+      row.cls = "bad";
+      row.text = `every zoom of ${park.label} came back empty — a whole map with no `
+        + `tiles is a source that is not answering, not a map. Check the proxy or `
+        + `the credentials behind it before believing this`;
+    }
+    redrawRows();
+    saveRows();
+    refreshResultButtons();
   }
 
   // A clipped walk measured the window, not the map, so the only useful
