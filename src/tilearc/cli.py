@@ -28,8 +28,14 @@ from .job import JobRequest, run_job
 from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan
 from .progress import Progress
 from .state import default_state_path
-from .tdr import build_tdr_source, check_worker_quota, load_credentials, normalise_modes
-from .trace import TraceOptions, coverage_payload
+from .tdr import (
+    WORKER_DAILY_QUOTA,
+    build_tdr_source,
+    check_worker_quota,
+    load_credentials,
+    normalise_modes,
+)
+from .trace import BatchProbe, TraceOptions, coverage_payload
 from .trace import estimate_requests as estimate_trace_requests
 from .trace import trace as trace_coverage
 from .urls import build_source
@@ -38,6 +44,11 @@ from .verify import verify as verify_archive
 from .writers import FORMATS, default_output
 
 DEFAULT_MAX_TILES = 250_000
+
+#: Tile probes per Worker request when tracing through a batch endpoint.
+#: Measured on TDR-shaped work, where the walk dominates and each ring step
+#: costs one call regardless of how many tiles a batch could carry.
+BATCH_REDUCTION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -469,18 +480,49 @@ def cmd_trace(args: argparse.Namespace) -> int:
 
     warnings: list[str] = []
     if any(source.uses_shared_proxy for source in sources.values()):
-        # The border walk is a fraction of a download, but it is still someone
-        # else's shared Worker quota, and the same cap applies.
-        warnings.extend(
-            check_worker_quota(upper_bound, forced=args.force, cap=args.worker_max_tiles)
-        )
-        info("")
-        info(
-            "note     routed through the shared Worker, which answers 204 both for a "
-            "missing\n         tile and for an upstream refusal. Those are "
-            "indistinguishable here, so\n         every zoom is audited afterwards -- "
-            "and --direct is the better measurement."
-        )
+        if args.probe_url:
+            # Measured at about 3x on TDR-shaped work, not the batch size: the
+            # walk dominates, and one ring step is one batch call however many
+            # tiles a batch could hold. The real gain is that a refusal comes
+            # back as a refusal.
+            batches = -(-upper_bound // BATCH_REDUCTION)
+            info("")
+            info(f"batched  {args.probe_url}")
+            info(
+                f"         reports refusals as refusals rather than as missing tiles, "
+                f"which is\n         the ambiguity that makes Worker-routed traces "
+                f"untrustworthy. Roughly\n         {batches:,} Worker requests instead of "
+                f"{upper_bound:,} -- about 3x, since a ring step is\n         one call "
+                f"whatever the batch size allows."
+            )
+        elif args.my_worker:
+            # Owning it does not make the free tier's 100k/day imaginary, and
+            # live viewer traffic still shares it -- but the cost is a fact to
+            # report, not a warning to issue.
+            share = upper_bound / WORKER_DAILY_QUOTA * 100
+            info("")
+            info(
+                f"worker   your own, so no cap applied. This is {upper_bound:,} requests, "
+                f"~{share:.0f}% of\n         the free tier's {WORKER_DAILY_QUOTA:,}/day, "
+                f"shared with live viewer traffic."
+            )
+            info(
+                "         --probe-url cuts that to about a third and, more to the "
+                "point, tells\n         a refusal from a missing tile; see "
+                "tools/worker-exists-endpoint.js"
+            )
+        else:
+            warnings.extend(
+                check_worker_quota(upper_bound, forced=args.force, cap=args.worker_max_tiles)
+            )
+        if not args.probe_url:
+            info("")
+            info(
+                "note     the tile proxy answers 204 both for a missing tile and for an "
+                "upstream\n         refusal, so the two are indistinguishable here. Every "
+                "zoom is audited\n         afterwards; --probe-url or --direct removes the "
+                "ambiguity outright."
+            )
     for message in warnings:
         warn(message)
     info("")
@@ -495,11 +537,22 @@ def cmd_trace(args: argparse.Namespace) -> int:
     progress = Progress(upper_bound, enabled=not args.no_progress)
     results: dict[str, list] = {}
     for mode, source in sources.items():
+        batch = None
+        if args.probe_url:
+            batch = BatchProbe(
+                url=args.probe_url,
+                server_id=(
+                    load_credentials(park, args.tdr_credentials).server_id or version.code
+                ),
+                mode=mode or "daytime",
+                limit=args.probe_batch,
+            )
         results[mode] = asyncio.run(
             trace_coverage(
                 source, zooms, options,
                 on_request=progress.tick,
                 on_zoom_done=lambda _t: None,
+                batch=batch,
             )
         )
     progress.close()
@@ -945,6 +998,22 @@ def build_parser() -> argparse.ArgumentParser:
              "from a missing tile, which the Worker's 204 is not.",
     )
     trace_parser.add_argument("--tdr-credentials")
+    trace_parser.add_argument(
+        "--probe-url",
+        help="URL of a batch existence endpoint on your own Worker (see "
+             "tools/worker-exists-endpoint.js). Asks about tiles in bulk, so a trace "
+             "costs hundreds of Worker requests instead of tens of thousands, and a "
+             "refusal comes back as a refusal instead of as a missing tile.",
+    )
+    trace_parser.add_argument(
+        "--probe-batch", type=int, default=48,
+        help="tiles per batch request (default 48; Cloudflare's free tier allows 50 "
+             "subrequests per invocation)",
+    )
+    trace_parser.add_argument(
+        "--my-worker", action="store_true",
+        help="the Worker is yours: report the quota cost rather than capping the run",
+    )
     trace_parser.add_argument(
         "--worker-max-tiles", type=int, default=10_000,
         help="safety cap on requests routed through the shared Worker",

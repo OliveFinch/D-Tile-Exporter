@@ -90,6 +90,59 @@ class TraceRefused(TilearcError):
     """The server stopped answering partway through a walk."""
 
 
+@dataclass
+class BatchProbe:
+    """A bulk existence endpoint on a Worker you control.
+
+    The reason to use it is correctness. It can answer ``refused`` as a verdict
+    of its own, which the tile proxy cannot: serving imagery, an upstream 403
+    and 404 both correctly become "204, nothing to draw", and a walk cannot tell
+    a stale signature from the edge of the map.
+
+    It is also cheaper, though by less than the batch size suggests -- about 3x
+    on TDR-shaped work. The seed lattice fills a batch, but the walk dominates
+    and one ring step is one call whether a batch holds 8 tiles or 48.
+
+    See ``tools/worker-exists-endpoint.js`` for the other half.
+    """
+
+    url: str
+    server_id: str
+    mode: str
+    #: Cloudflare's free tier allows 50 subrequests per invocation.
+    limit: int = 48
+
+    async def check(
+        self, client: httpx.AsyncClient, zoom: int, points: Sequence[tuple[int, int]]
+    ) -> list[str]:
+        response = await client.post(
+            self.url,
+            json={
+                "sid": self.server_id,
+                "mode": self.mode,
+                "z": zoom,
+                "tiles": [[x, y] for x, y in points],
+            },
+        )
+        if response.status_code != 200:
+            raise TraceRefused(
+                f"the batch endpoint at {self.url} answered HTTP "
+                f"{response.status_code}: {response.text[:200]}"
+            )
+        verdicts = str(response.json().get("verdicts", ""))
+        if len(verdicts) != len(points):
+            # Lining a short string up against coordinates by index would
+            # quietly attribute one tile's answer to another.
+            raise TraceRefused(
+                f"the batch endpoint returned {len(verdicts)} verdicts for "
+                f"{len(points)} tiles; refusing to guess which is which"
+            )
+        return [
+            {"P": Verdict.PRESENT, "A": Verdict.ABSENT}.get(char, Verdict.REFUSED)
+            for char in verdicts
+        ]
+
+
 # ---------------------------------------------------------------------------
 # asking the server
 # ---------------------------------------------------------------------------
@@ -113,10 +166,12 @@ class TileOracle:
         options: TraceOptions,
         limiter=None,
         on_request: Callable[[], None] | None = None,
+        batch: "BatchProbe | None" = None,
     ) -> None:
         self.client = client
         self.source = source
         self.options = options
+        self.batch = batch
         self.limiter = limiter or (
             RateLimiter(options.rps) if options.rps > 0 else NullRateLimiter()
         )
@@ -228,12 +283,81 @@ class TileOracle:
         going round the ring, and "first" has to keep meaning first however the
         responses happen to land.
         """
+        if self.batch is not None:
+            await self._prefetch(zoom, points)
         return list(await asyncio.gather(*(self.present(zoom, x, y) for x, y in points)))
+
+    async def _prefetch(self, zoom: int, points: Sequence[tuple[int, int]]) -> None:
+        """Resolve everything not already known in as few requests as possible.
+
+        Only tiles that are neither cached nor already in flight are asked
+        about, so the batch shrinks as the walk re-treads ground -- which it
+        does constantly, since consecutive border tiles share most of their
+        ring.
+        """
+        wanted: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for x, y in points:
+            key = (x, y)
+            if key in seen or key in self._cache or key in self._inflight:
+                continue
+            if self.limits is not None and not _inside(self.limits, x, y):
+                continue
+            seen.add(key)
+            wanted.append(key)
+        if not wanted:
+            return
+
+        assert self.batch is not None
+        for start in range(0, len(wanted), self.batch.limit):
+            chunk = wanted[start:start + self.batch.limit]
+            if self.capped:
+                return
+            if self.requests >= self.options.max_requests:
+                self.capped = True
+                return
+            await self.limiter.acquire()
+            self.requests += len(chunk)
+            if self.on_request:
+                for _ in chunk:
+                    self.on_request()
+            verdicts = await self.batch.check(self.client, zoom, chunk)
+            for point, verdict in zip(chunk, verdicts):
+                if verdict == Verdict.REFUSED:
+                    self.refusals += 1
+                    self._run_of_refusals += 1
+                else:
+                    self._run_of_refusals = 0
+                self._cache[point] = verdict == Verdict.PRESENT
+            if self._run_of_refusals >= self.options.refusal_limit:
+                raise TraceRefused(
+                    f"{self.source.name}: {self._run_of_refusals} tiles in a row came "
+                    f"back refused from the batch endpoint. A refusal is not an absent "
+                    f"tile -- for TDR this usually means the Worker's CloudFront "
+                    f"cookies have expired."
+                )
 
     async def recheck(self, zoom: int, x: int, y: int) -> bool:
         """Ask again, ignoring what the cache was told last time."""
         self._cache.pop((x, y), None)
         return await self.present(zoom, x, y)
+
+    async def recheck_many(self, zoom: int, points: Sequence[tuple[int, int]]) -> list[bool]:
+        for point in points:
+            self._cache.pop(point, None)
+        return await self.many(zoom, points)
+
+    @property
+    def ask_width(self) -> int:
+        """How many tiles it is worth asking about in one go.
+
+        Probing one tile per request, this is the concurrency -- more in flight
+        than that just queues. Through a batch endpoint the unit is the batch,
+        so anywhere without an inherent limit should fill one.
+        """
+        if self.batch is not None:
+            return max(1, self.batch.limit)
+        return max(1, self.options.concurrency)
 
     def recorded_absent(self) -> list[tuple[int, int]]:
         return [point for point, present in self._cache.items() if not present]
@@ -500,14 +624,14 @@ async def _walk(oracle: TileOracle, zoom: int, seed: tuple[int, int]) -> list[tu
     step to the first filled neighbour, repeat. Jacob's criterion stops it: the
     same (tile, arrived-from) pair means the loop has closed.
     """
-    width = max(1, oracle.options.concurrency)
+    width = oracle.ask_width
     sx, sy = seed
     # West until the tile west is empty -- that is a border tile, and starting
     # anywhere else risks tracing off in the wrong direction. Asked a run at a
     # time; the tiles past the edge cost one batch and land in the cache the
     # walk is about to use anyway.
     while True:
-        span = min(width, 16)
+        span = min(width, 32)
         answers = await oracle.many(zoom, [(sx - i, sy) for i in range(1, span + 1)])
         gap = answers.index(False) if False in answers else -1
         sx -= span if gap == -1 else gap
@@ -535,7 +659,7 @@ async def _walk(oracle: TileOracle, zoom: int, seed: tuple[int, int]) -> list[tu
         # the tile chosen is the same one -- speculation changes what is asked,
         # never what is picked -- and consecutive border tiles share most of
         # their ring, so the extra asks are largely reclaimed from the cache.
-        look = min(8, width)
+        look = min(8, max(oracle.options.concurrency, 8 if oracle.batch else 1))
         moved = False
         for base in range(0, 8, look):
             slice_ = ring[base:base + look]
@@ -568,7 +692,7 @@ async def _find_seed(
     bounding box, which is what keeps the sweep affordable -- and is also why a
     region sitting wholly inside another's box goes unreported.
     """
-    width = max(1, oracle.options.concurrency)
+    width = oracle.ask_width
     for target in SEED_LATTICES:
         side = target ** 0.5
         step_x = max(1, -(-declared.width // int(side)))
@@ -629,8 +753,8 @@ async def _audit(
 
     probes = _spread(suspects, oracle.options.audit_absences)
     controls = _spread(known, oracle.options.audit_controls)
-    answered = [await oracle.recheck(zoom, x, y) for x, y in probes]
-    alive = [await oracle.recheck(zoom, x, y) for x, y in controls]
+    answered = await oracle.recheck_many(zoom, probes)
+    alive = await oracle.recheck_many(zoom, controls)
     return (
         [point for point, hit in zip(probes, answered) if hit],
         [point for point, hit in zip(controls, alive) if not hit],
@@ -723,6 +847,7 @@ async def trace(
     client: httpx.AsyncClient | None = None,
     on_zoom_done: Callable[[ZoomTrace], None] | None = None,
     on_request: Callable[[], None] | None = None,
+    batch: BatchProbe | None = None,
 ) -> list[ZoomTrace]:
     options = options or TraceOptions()
     owns_client = client is None
@@ -732,7 +857,7 @@ async def trace(
             limits=httpx.Limits(max_connections=max(1, options.concurrency)),
             follow_redirects=True,
         )
-    oracle = TileOracle(client, source, options, on_request=on_request)
+    oracle = TileOracle(client, source, options, on_request=on_request, batch=batch)
     results: list[ZoomTrace] = []
     try:
         for zoom, declared in zooms:

@@ -12,6 +12,7 @@ server bothers to distinguish them -- direct TDR does, the Worker does not.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ import pytest
 from tilearc.config import TileBounds
 from tilearc.errors import CredentialsError
 from tilearc.trace import (
+    BatchProbe,
     TraceOptions,
     TraceRefused,
     coverage_payload,
@@ -309,3 +311,134 @@ def test_coverage_payload_carries_runs_for_an_irregular_footprint():
 
     assert payload["shape"] == "irregular"
     assert payload["runs"] == [[203, 212, 104, 130], [213, 228, 104, 114]]
+
+
+# ---------------------------------------------------------------------------
+# the batch endpoint -- a Worker you own can answer better than a tile proxy
+# ---------------------------------------------------------------------------
+
+
+def batch_world(shape, *, refuse_after: int | None = None):
+    """A Worker-style /exists endpoint over a synthetic map."""
+    state = {"tiles": 0, "calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/exists")
+        body = json.loads(request.content)
+        state["calls"] += 1
+        verdicts = []
+        for x, y in body["tiles"]:
+            state["tiles"] += 1
+            if refuse_after is not None and state["tiles"] > refuse_after:
+                verdicts.append("R")
+            else:
+                verdicts.append("P" if shape(x, y) else "A")
+        return httpx.Response(200, json={"z": body["z"], "verdicts": "".join(verdicts)})
+
+    return handler, state
+
+
+def run_batched(shape, declared, *, zoom=10, refuse_after=None, limit=48):
+    handler, state = batch_world(shape, refuse_after=refuse_after)
+    probe = BatchProbe(url="https://worker.test/exists", server_id="1", mode="daytime", limit=limit)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(zoom, declared)],
+                TraceOptions(rps=0, concurrency=8),
+                client=client, batch=probe,
+            )
+
+    return asyncio.run(go())[0], state
+
+
+def test_batching_returns_the_same_footprint_as_probing_one_by_one():
+    shape = lambda x, y: (104 <= x <= 130 and 203 <= y <= 212) or (
+        104 <= x <= 114 and 203 <= y <= 228
+    )
+    single, _calls = run(shape, DECLARED)
+    batched, _state = run_batched(shape, DECLARED)
+
+    assert batched.box == single.box
+    assert batched.covered == single.covered
+    assert batched.runs() == single.runs()
+    assert tiles_of(batched) == truth_of(shape, DECLARED)
+
+
+def test_batching_costs_far_fewer_worker_requests():
+    shape = lambda x, y: 104 <= x <= 130 and 203 <= y <= 224
+    _single, calls = run(shape, DECLARED)
+    _batched, state = run_batched(shape, DECLARED)
+
+    # Same question, an order of magnitude fewer invocations of the Worker.
+    assert state["calls"] < len(calls) / 5
+
+
+def test_a_refused_verdict_is_not_read_as_an_absent_tile():
+    """The whole point of the endpoint: 403 and 404 stay apart.
+
+    A tile proxy collapses both into 204, so a stale-cookie run traces a
+    confident border around an outage. Here a run of refusals stops the trace.
+    """
+    shape = lambda x, y: 104 <= x <= 130 and 203 <= y <= 224
+    with pytest.raises(TraceRefused, match="refused"):
+        run_batched(shape, DECLARED, refuse_after=20)
+
+
+def test_a_short_verdict_string_is_refused_rather_than_misaligned():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"verdicts": "P" * (len(body["tiles"]) - 1)})
+
+    probe = BatchProbe(url="https://worker.test/exists", server_id="1", mode="daytime")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(10, DECLARED)], TraceOptions(rps=0), client=client, batch=probe
+            )
+
+    with pytest.raises(TraceRefused, match="refusing to guess"):
+        asyncio.run(go())
+
+
+def test_an_endpoint_error_is_surfaced_not_swallowed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="worker is missing its CloudFront credentials")
+
+    probe = BatchProbe(url="https://worker.test/exists", server_id="1", mode="daytime")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(10, DECLARED)], TraceOptions(rps=0), client=client, batch=probe
+            )
+
+    with pytest.raises(TraceRefused, match="503"):
+        asyncio.run(go())
+
+
+def test_chunks_respect_the_subrequest_limit():
+    shape = lambda x, y: 104 <= x <= 130 and 203 <= y <= 224
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(len(body["tiles"]))
+        return httpx.Response(
+            200,
+            json={"verdicts": "".join("P" if shape(x, y) else "A" for x, y in body["tiles"])},
+        )
+
+    probe = BatchProbe(url="https://worker.test/exists", server_id="1", mode="daytime", limit=10)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(10, DECLARED)], TraceOptions(rps=0, concurrency=32),
+                client=client, batch=probe,
+            )
+
+    asyncio.run(go())
+    assert seen and max(seen) <= 10
