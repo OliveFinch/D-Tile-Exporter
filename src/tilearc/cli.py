@@ -144,15 +144,16 @@ def plan_from(args: argparse.Namespace, repo: ParkRepository) -> JobPlan:
 
     modes = normalise_modes(args.mode) if park.requires_credentials else []
 
-    coverage = None
+    coverage = coverage_version = None
     path = getattr(args, "coverage", None)
     if path:
-        coverage = load_coverage(path, park.park_id)
+        coverage, coverage_version = load_coverage(path, park.park_id)
 
     return build_plan(
         park,
         version,
         coverage=coverage,
+        coverage_version=coverage_version,
         min_zoom=min_zoom,
         max_zoom=max_zoom,
         bbox=bbox,

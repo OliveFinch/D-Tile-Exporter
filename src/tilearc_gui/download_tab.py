@@ -41,7 +41,8 @@ from .formatting import human_bytes, human_duration
 from .workers import DownloadWorker, run_async
 
 FORMAT_CHOICES = [
-    ("dir", "Folder of tiles  —  {z}/{x}/{y}.jpg"),
+    ("library", "Library  —  {park}/{version}/{z}/{x}/{y}.jpg, shared across versions"),
+    ("dir", "Folder of tiles  —  {park}_{version}/{z}/{x}/{y}.jpg"),
     ("zip", "Zip archive"),
     ("mbtiles", "MBTiles database"),
 ]
@@ -534,7 +535,13 @@ class DownloadTab(QWidget):
             self.destination = Path(chosen)
             self._update_destination_label()
 
-    def _output_path(self) -> Path | None:
+    def _job_output(self) -> Path | None:
+        """What the writer is handed.
+
+        For a library that is the root of the whole tree, not this job's corner
+        of it: the writer appends {park}/{version} itself, so handing it the
+        full path would bury the tiles under wdw/47/wdw/47.
+        """
         if self.destination is None or self.plan is None:
             return None
         fmt = self.format_combo.currentData()
@@ -543,7 +550,18 @@ class DownloadTab(QWidget):
             return self.destination / f"{stem}.zip"
         if fmt == "mbtiles":
             return self.destination / f"{stem}.mbtiles"
+        if fmt == "library":
+            return self.destination
         return self.destination / stem
+
+    def _output_path(self) -> Path | None:
+        """Where the tiles will land, for showing someone."""
+        job = self._job_output()
+        if job is None:
+            return None
+        if self.format_combo.currentData() == "library":
+            return job / self.plan.park.park_id / self.plan.version.code
+        return job
 
     @Slot()
     def _update_destination_label(self) -> None:
@@ -589,7 +607,7 @@ class DownloadTab(QWidget):
 
     @Slot()
     def _start(self) -> None:
-        plan, output = self.plan, self._output_path()
+        plan, output = self.plan, self._job_output()
         if plan is None or output is None:
             return
 
@@ -631,7 +649,7 @@ class DownloadTab(QWidget):
         )
 
         self.log.clear()
-        self._note(f"Downloading {plan.total_tiles:,} tiles to {output}")
+        self._note(f"Downloading {plan.total_tiles:,} tiles to {self._output_path()}")
         self.progress_bar.setValue(0)
 
         self._worker = DownloadWorker(request)
