@@ -99,6 +99,10 @@
       <label for="margin">Search margin</label>
       <input type="number" id="margin" value="8" min="0" max="512" style="width:110px">
     </div>
+    <div>
+      <label for="extra">Probes hunting more regions</label>
+      <input type="number" id="extra" value="150" min="0" max="5000" style="width:180px">
+    </div>
   </div>
 </fieldset>
 
@@ -710,7 +714,9 @@
   const inside = (box, x, y) =>
     x >= box.minX && x <= box.maxX && y >= box.minY && y <= box.maxY;
 
-  async function findSeed(b, claimed, done) {
+  async function findSeed(b, claimed, done, budget) {
+    const spentAt = requests;
+    const overspent = () => budget != null && requests - spentAt >= budget;
     const w = b.maxX - b.minX + 1, h = b.maxY - b.minY + 1;
     for (const target of [9, 49, 225, 900]) {
       const side = Math.sqrt(target);
@@ -730,7 +736,7 @@
       };
       for (let y = b.minY; y <= b.maxY; y += stepY) {
         for (let x = b.minX; x <= b.maxX; x += stepX) {
-          if (stopped || capped) return null;
+          if (stopped || capped || overspent()) return null;
           if (claimed.has(x + "," + y)) continue;
           // Skip ground already walked, without paying to re-probe it. This is
           // why the sweep is affordable: after one region is traced its whole
@@ -868,9 +874,23 @@
     // seeds to try. A seed landing inside a region already walked re-walks it
     // for free -- every tile is cached by then -- so the duplicate check below
     // costs nothing but still needs a budget to run in.
+    // Finding the map at all is worth any number of probes -- without a seed
+    // there is nothing to report. Proving that nothing *else* is out there is
+    // not: on a map whose declared box is far bigger than its imagery, that
+    // sweep costs more than the walk it follows, and every probe lands on empty
+    // ground. So the first seed hunts without limit and later ones get a
+    // budget, after which the zoom is called done.
+    //
+    // It was never a guarantee -- a region smaller than the finest lattice was
+    // always missable -- so this trades a weaker version of an assurance that
+    // was already partial for a large part of the cost.
+    const extra = Math.max(0, +$("extra").value || 0);
+
     for (let attempt = 0; attempt < maxParts * 50 && regions.length < maxParts; attempt++) {
       if (stopped || capped) break;
-      const seed = await findSeed(declared, claimed, walked);
+      const budget = regions.length === 0 ? null : extra;
+      if (budget === 0) break;
+      const seed = await findSeed(declared, claimed, walked, budget);
       if (!seed) break;
       claimed.add(seed.join(","));
 
