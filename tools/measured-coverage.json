@@ -1,0 +1,541 @@
+{
+  "$comment": "Measured tile coverage for the public Disney park maps. Produced by tools/tile-border-trace.html and tools/coverage-extract.html by walking each zoom's border; everything a border encloses is imagery. Coordinates are inclusive, in server tile space (SHDR is TMS, already unflipped). runs are [yFrom, yTo, xFrom, xTo]: every row in the group is covered by that one contiguous x range. A rectangle is fully described by its box.",
+  "measured": "2026-07-26",
+  "tool": "tile-border-trace / coverage-extract",
+  "generated": "2026-07-26T11:37:54+00:00",
+  "totalTiles": 1097930,
+  "maps": {
+    "wdw": {
+      "name": "Walt Disney World",
+      "tiles": 575490,
+      "zooms": {
+        "11": {
+          "box": {
+            "minX": 555,
+            "maxX": 564,
+            "minY": 851,
+            "maxY": 859
+          },
+          "tiles": 90,
+          "shape": "rectangle"
+        },
+        "12": {
+          "box": {
+            "minX": 1114,
+            "maxX": 1125,
+            "minY": 1706,
+            "maxY": 1715
+          },
+          "tiles": 120,
+          "shape": "rectangle"
+        },
+        "13": {
+          "box": {
+            "minX": 2228,
+            "maxX": 2251,
+            "minY": 3412,
+            "maxY": 3431
+          },
+          "tiles": 480,
+          "shape": "rectangle"
+        },
+        "14": {
+          "box": {
+            "minX": 4456,
+            "maxX": 4503,
+            "minY": 6824,
+            "maxY": 6863
+          },
+          "tiles": 1920,
+          "shape": "rectangle"
+        },
+        "15": {
+          "box": {
+            "minX": 8928,
+            "maxX": 8987,
+            "minY": 13672,
+            "maxY": 13699
+          },
+          "tiles": 1680,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 17856,
+            "maxX": 17975,
+            "minY": 27344,
+            "maxY": 27399
+          },
+          "tiles": 6720,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 35712,
+            "maxX": 35951,
+            "minY": 54688,
+            "maxY": 54799
+          },
+          "tiles": 26880,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 71424,
+            "maxX": 71903,
+            "minY": 109376,
+            "maxY": 109599
+          },
+          "tiles": 107520,
+          "shape": "rectangle"
+        },
+        "19": {
+          "box": {
+            "minX": 143264,
+            "maxX": 143455,
+            "minY": 218752,
+            "maxY": 219199
+          },
+          "tiles": 86016,
+          "shape": "rectangle"
+        },
+        "20": {
+          "box": {
+            "minX": 286528,
+            "maxX": 286911,
+            "minY": 437504,
+            "maxY": 438399
+          },
+          "tiles": 344064,
+          "shape": "rectangle"
+        }
+      }
+    },
+    "dlr": {
+      "name": "Disneyland Resort (California)",
+      "tiles": 464168,
+      "zooms": {
+        "14": {
+          "box": {
+            "minX": 2818,
+            "maxX": 2831,
+            "minY": 6549,
+            "maxY": 6560
+          },
+          "tiles": 168,
+          "shape": "rectangle"
+        },
+        "15": {
+          "box": {
+            "minX": 5636,
+            "maxX": 5663,
+            "minY": 13102,
+            "maxY": 13117
+          },
+          "tiles": 448,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 11272,
+            "maxX": 11327,
+            "minY": 26208,
+            "maxY": 26231
+          },
+          "tiles": 1344,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 22544,
+            "maxX": 22655,
+            "minY": 52416,
+            "maxY": 52463
+          },
+          "tiles": 5376,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 45088,
+            "maxX": 45311,
+            "minY": 104832,
+            "maxY": 104927
+          },
+          "tiles": 21504,
+          "shape": "rectangle"
+        },
+        "19": {
+          "box": {
+            "minX": 90176,
+            "maxX": 90623,
+            "minY": 209664,
+            "maxY": 209855
+          },
+          "tiles": 86016,
+          "shape": "rectangle"
+        },
+        "20": {
+          "box": {
+            "minX": 180352,
+            "maxX": 181247,
+            "minY": 419328,
+            "maxY": 419752
+          },
+          "tiles": 349312,
+          "shape": "irregular",
+          "runs": [
+            [
+              419328,
+              419711,
+              180352,
+              181247
+            ],
+            [
+              419712,
+              419752,
+              180736,
+              180863
+            ]
+          ]
+        }
+      }
+    },
+    "dlp": {
+      "name": "Disneyland Paris",
+      "tiles": 36014,
+      "zooms": {
+        "13": {
+          "box": {
+            "minX": 4158,
+            "maxX": 4160,
+            "minY": 2816,
+            "maxY": 2819
+          },
+          "tiles": 12,
+          "shape": "rectangle"
+        },
+        "14": {
+          "box": {
+            "minX": 8316,
+            "maxX": 8321,
+            "minY": 5633,
+            "maxY": 5639
+          },
+          "tiles": 42,
+          "shape": "rectangle"
+        },
+        "15": {
+          "box": {
+            "minX": 16633,
+            "maxX": 16642,
+            "minY": 11266,
+            "maxY": 11278
+          },
+          "tiles": 130,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 33267,
+            "maxX": 33285,
+            "minY": 22532,
+            "maxY": 22556
+          },
+          "tiles": 475,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 66535,
+            "maxX": 66571,
+            "minY": 45065,
+            "maxY": 45112
+          },
+          "tiles": 1776,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 133071,
+            "maxX": 133142,
+            "minY": 90130,
+            "maxY": 90224
+          },
+          "tiles": 6774,
+          "shape": "irregular",
+          "runs": [
+            [
+              90130,
+              90130,
+              133137,
+              133142
+            ],
+            [
+              90131,
+              90224,
+              133071,
+              133142
+            ]
+          ]
+        },
+        "19": {
+          "box": {
+            "minX": 266142,
+            "maxX": 266285,
+            "minY": 180261,
+            "maxY": 180449
+          },
+          "tiles": 26805,
+          "shape": "irregular",
+          "runs": [
+            [
+              180261,
+              180261,
+              266274,
+              266284
+            ],
+            [
+              180262,
+              180307,
+              266142,
+              266284
+            ],
+            [
+              180308,
+              180397,
+              266143,
+              266284
+            ],
+            [
+              180398,
+              180449,
+              266143,
+              266285
+            ]
+          ]
+        },
+        "20": {
+          "box": null,
+          "tiles": 0,
+          "shape": "empty"
+        }
+      }
+    },
+    "hkdl": {
+      "name": "Hong Kong Disneyland",
+      "tiles": 9332,
+      "zooms": {
+        "14": {
+          "box": {
+            "minX": 13380,
+            "maxX": 13383,
+            "minY": 7148,
+            "maxY": 7150
+          },
+          "tiles": 12,
+          "shape": "rectangle"
+        },
+        "15": {
+          "box": {
+            "minX": 26762,
+            "maxX": 26765,
+            "minY": 14297,
+            "maxY": 14300
+          },
+          "tiles": 16,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 53524,
+            "maxX": 53531,
+            "minY": 28594,
+            "maxY": 28601
+          },
+          "tiles": 64,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 107048,
+            "maxX": 107063,
+            "minY": 57188,
+            "maxY": 57203
+          },
+          "tiles": 256,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 214096,
+            "maxX": 214127,
+            "minY": 114376,
+            "maxY": 114407
+          },
+          "tiles": 1024,
+          "shape": "rectangle"
+        },
+        "19": {
+          "box": {
+            "minX": 428207,
+            "maxX": 428242,
+            "minY": 228756,
+            "maxY": 228807
+          },
+          "tiles": 1592,
+          "shape": "irregular",
+          "runs": [
+            [
+              228756,
+              228769,
+              428207,
+              428222
+            ],
+            [
+              228770,
+              228807,
+              428207,
+              428242
+            ]
+          ]
+        },
+        "20": {
+          "box": {
+            "minX": 856414,
+            "maxX": 856485,
+            "minY": 457512,
+            "maxY": 457615
+          },
+          "tiles": 6368,
+          "shape": "irregular",
+          "runs": [
+            [
+              457512,
+              457539,
+              856414,
+              856445
+            ],
+            [
+              457540,
+              457615,
+              856414,
+              856485
+            ]
+          ]
+        }
+      }
+    },
+    "shdr": {
+      "name": "Shanghai Disney Resort",
+      "tiles": 12926,
+      "zooms": {
+        "9": {
+          "box": null,
+          "tiles": 0,
+          "shape": "empty"
+        },
+        "10": {
+          "box": null,
+          "tiles": 0,
+          "shape": "empty"
+        },
+        "11": {
+          "box": null,
+          "tiles": 0,
+          "shape": "empty"
+        },
+        "12": {
+          "box": {
+            "minX": 825,
+            "maxX": 827,
+            "minY": 220,
+            "maxY": 222
+          },
+          "tiles": 9,
+          "shape": "rectangle"
+        },
+        "13": {
+          "box": {
+            "minX": 1651,
+            "maxX": 1655,
+            "minY": 441,
+            "maxY": 444
+          },
+          "tiles": 20,
+          "shape": "rectangle"
+        },
+        "14": {
+          "box": {
+            "minX": 3302,
+            "maxX": 3310,
+            "minY": 882,
+            "maxY": 889
+          },
+          "tiles": 72,
+          "shape": "rectangle"
+        },
+        "15": {
+          "box": {
+            "minX": 6609,
+            "maxX": 6617,
+            "minY": 1768,
+            "maxY": 1776
+          },
+          "tiles": 81,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 13218,
+            "maxX": 13235,
+            "minY": 3536,
+            "maxY": 3553
+          },
+          "tiles": 324,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 26447,
+            "maxX": 26459,
+            "minY": 7084,
+            "maxY": 7095
+          },
+          "tiles": 156,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 52895,
+            "maxX": 52919,
+            "minY": 14168,
+            "maxY": 14191
+          },
+          "tiles": 600,
+          "shape": "rectangle"
+        },
+        "19": {
+          "box": {
+            "minX": 105791,
+            "maxX": 105839,
+            "minY": 28336,
+            "maxY": 28383
+          },
+          "tiles": 2352,
+          "shape": "rectangle"
+        },
+        "20": {
+          "box": {
+            "minX": 211583,
+            "maxX": 211679,
+            "minY": 56672,
+            "maxY": 56767
+          },
+          "tiles": 9312,
+          "shape": "rectangle"
+        }
+      }
+    }
+  }
+}
