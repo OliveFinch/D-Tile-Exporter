@@ -1,8 +1,8 @@
 {
-  "$comment": "Measured tile coverage for the public Disney park maps. Produced by tools/tile-border-trace.html and tools/coverage-extract.html by walking each zoom's border; everything a border encloses is imagery. Coordinates are inclusive, in server tile space (SHDR is TMS, already unflipped). runs are [yFrom, yTo, xFrom, xTo]: every row in the group is covered by that one contiguous x range. A rectangle is fully described by its box.",
+  "$comment": "Measured tile coverage for the public Disney park maps. Produced by tools/tile-border-trace.html and tools/coverage-extract.html by walking each zoom's border; everything a border encloses is imagery. Coordinates are inclusive, in server tile space (SHDR is TMS, already unflipped). runs are [yFrom, yTo, xFrom, xTo]: every row in the group is covered by that one contiguous x range. A rectangle is fully described by its box. Each park records the version its footprint was measured against: a map's coverage changes between versions, so applying one version's footprint to another will miss tiles or ask for tiles that version never had.",
   "measured": "2026-07-26",
   "tool": "tile-border-trace / coverage-extract",
-  "generated": "2026-07-26T18:17:52+00:00",
+  "generated": "2026-07-26T18:44:27+00:00",
   "totalTiles": 1114310,
   "maps": {
     "wdw": {
@@ -109,6 +109,10 @@
           "tiles": 344064,
           "shape": "rectangle"
         }
+      },
+      "measuredAgainst": {
+        "version": "900014458",
+        "label": "Jul '26 (Late)"
       }
     },
     "dlr": {
@@ -199,6 +203,10 @@
             ]
           ]
         }
+      },
+      "measuredAgainst": {
+        "version": "840388841",
+        "label": "Jul '26 (Late)"
       }
     },
     "dlp": {
@@ -320,6 +328,10 @@
           "tiles": 0,
           "shape": "empty"
         }
+      },
+      "measuredAgainst": {
+        "version": "current",
+        "label": "Current"
       }
     },
     "hkdl": {
@@ -424,6 +436,10 @@
             ]
           ]
         }
+      },
+      "measuredAgainst": {
+        "version": "51",
+        "label": "Jun 2026"
       }
     },
     "shdr": {
@@ -535,6 +551,10 @@
           "tiles": 9312,
           "shape": "rectangle"
         }
+      },
+      "measuredAgainst": {
+        "version": "981376074",
+        "label": "Mar '26"
       }
     },
     "tdr": {
@@ -606,6 +626,10 @@
           "tiles": 12288,
           "shape": "rectangle"
         }
+      },
+      "measuredAgainst": {
+        "version": "20260122183830",
+        "label": "Jan 2026"
       }
     }
   }

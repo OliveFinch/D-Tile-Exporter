@@ -121,11 +121,17 @@ class JobPlan:
         return [(zp.zoom, zp.bounds, zp.count) for zp in self.zooms]
 
 
-def load_coverage(path: str | Path, park_id: str) -> dict[int, dict]:
-    """Read one park's measured footprints from a coverage file.
+def load_coverage(path: str | Path, park_id: str) -> tuple[dict[int, dict], dict | None]:
+    """Read one park's measured footprints, and which version they came from.
 
     The file is what ``tools/tile-border-trace.html`` and ``tilearc trace``
     produce: for each zoom, either a box or explicit row runs.
+
+    The version matters as much as the shapes. A park's coverage changes
+    between versions -- WDW has ninety-odd, spanning nine years -- so a
+    footprint measured against the current map describes the current map. Used
+    against an older one it asks for tiles that version never had, and misses
+    any ground the old map covered and the new one dropped.
     """
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -148,7 +154,7 @@ def load_coverage(path: str | Path, park_id: str) -> dict[int, dict]:
             out[int(key)] = value
         except (TypeError, ValueError):
             continue
-    return out
+    return out, entry.get("measuredAgainst")
 
 
 def apply_coverage(
@@ -250,6 +256,7 @@ def build_plan(
     modes: list[str] | None = None,
     allow_tms_bbox: bool = False,
     coverage: dict[int, dict] | None = None,
+    coverage_version: dict | None = None,
 ) -> JobPlan:
     notes: list[str] = []
 
@@ -279,6 +286,23 @@ def build_plan(
         zoom_plans.append(ZoomPlan(zoom=zoom, bounds=bounds))
 
     if coverage is not None:
+        # Say this before anything else the coverage does, because it changes
+        # what all of it means.
+        measured_code = (coverage_version or {}).get("version")
+        if measured_code and str(measured_code) != str(version.code):
+            label = (coverage_version or {}).get("label") or measured_code
+            notes.append(
+                f"the coverage was measured against version {measured_code} ({label}), "
+                f"not {version.code}. A map's footprint changes between versions, so "
+                f"tiles this one never had will be requested and recorded as missing, "
+                f"and any ground it covered that the newer map dropped will not be "
+                f"asked for at all. Trace {version.code} for a footprint that matches it"
+            )
+        elif not measured_code:
+            notes.append(
+                "the coverage file does not say which version it was measured "
+                "against, so it cannot be checked against this one"
+            )
         if min_zoom is not None or max_zoom is not None:
             coverage = {
                 zoom: entry for zoom, entry in coverage.items()

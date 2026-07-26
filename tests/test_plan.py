@@ -47,7 +47,7 @@ def test_coverage_narrows_a_box_that_claims_more_than_the_server_serves(tmp_path
                "tiles": 12, "shape": "rectangle"},
     })
     plan = build_plan(park, VersionEntry(code="v"),
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert plan.total_tiles == 12                 # not the declared 24
     assert plan.zooms[0].bounds == TileBounds(4158, 4160, 2816, 2819)
@@ -64,7 +64,7 @@ def test_coverage_widens_a_box_that_would_have_missed_real_tiles(tmp_path):
                "tiles": 120, "shape": "rectangle"},
     })
     plan = build_plan(park, VersionEntry(code="v"),
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert plan.total_tiles == 120                # the declared plan fetches 80
     tiles = {(x, y) for _z, x, y, _m in plan.iter_tiles()}
@@ -85,7 +85,7 @@ def test_an_irregular_footprint_is_planned_as_runs_not_a_box(tmp_path):
                         [228770, 228807, 428207, 428242]]},
     })
     plan = build_plan(park, VersionEntry(code="v"),
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert plan.total_tiles == 1592               # not the 1,872 its box holds
     tiles = {(x, y) for _z, x, y, _m in plan.iter_tiles()}
@@ -106,7 +106,7 @@ def test_a_zoom_that_serves_nothing_is_dropped(tmp_path):
         "20": {"box": None, "tiles": 0, "shape": "empty"},
     })
     plan = build_plan(park, VersionEntry(code="v"),
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert [zp.zoom for zp in plan.zooms] == [19]
     assert any("serves nothing" in note for note in plan.notes)
@@ -126,7 +126,7 @@ def test_a_zoom_below_the_declared_minimum_is_added_when_it_is_measured(tmp_path
                "tiles": 72, "shape": "rectangle"},
     })
     plan = build_plan(park, VersionEntry(code="v"),
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert [zp.zoom for zp in plan.zooms] == [13, 14]
     assert plan.total_tiles == 92
@@ -144,7 +144,7 @@ def test_an_explicit_zoom_range_still_bounds_what_coverage_adds(tmp_path):
                "shape": "rectangle"},
     })
     plan = build_plan(park, VersionEntry(code="v"), min_zoom=14,
-                      coverage=load_coverage(path, park.park_id))
+                      coverage=load_coverage(path, park.park_id)[0])
 
     assert [zp.zoom for zp in plan.zooms] == [14]
 
@@ -160,7 +160,7 @@ def test_a_measured_plan_does_not_resume_from_a_declared_one(tmp_path):
     })
     declared = build_plan(park, VersionEntry(code="v"))
     measured = build_plan(park, VersionEntry(code="v"),
-                          coverage=load_coverage(path, park.park_id))
+                          coverage=load_coverage(path, park.park_id)[0])
 
     assert declared.fingerprint() != measured.fingerprint()
 
@@ -172,3 +172,42 @@ def test_a_coverage_file_without_this_park_says_so(tmp_path):
     path = _coverage_file(tmp_path, "dlr", {})
     with pytest.raises(TilearcError, match="no measured coverage for 'wdw'"):
         load_coverage(path, "wdw")
+
+
+def test_a_footprint_from_another_version_is_called_out(tmp_path):
+    """WDW has ninety-odd versions spanning nine years. A 2026 footprint does
+    not describe a 2017 map, and using one for the other looks exactly like the
+    downloader being broken."""
+    import json
+    from tilearc.plan import build_plan, load_coverage
+
+    park = _park(bounds={12: TileBounds(1118, 1125, 1706, 1715)}, min_zoom=12, max_zoom=12)
+    path = tmp_path / "coverage.json"
+    path.write_text(json.dumps({"maps": {"wdw": {
+        "measuredAgainst": {"version": "900014458", "label": "Jul '26 (Late)"},
+        "zooms": {"12": {"box": {"minX": 1114, "maxX": 1125, "minY": 1706, "maxY": 1715},
+                         "tiles": 120, "shape": "rectangle"}}}}}))
+    zooms, measured_against = load_coverage(path, "wdw")
+
+    stale = build_plan(park, VersionEntry(code="47"), coverage=zooms,
+                       coverage_version=measured_against)
+    assert any("measured against version 900014458" in note for note in stale.notes)
+
+    matching = build_plan(park, VersionEntry(code="900014458"), coverage=zooms,
+                          coverage_version=measured_against)
+    assert not any("measured against version" in note for note in matching.notes)
+
+
+def test_a_coverage_file_with_no_version_says_it_cannot_be_checked(tmp_path):
+    from tilearc.plan import build_plan, load_coverage
+
+    park = _park(bounds={12: TileBounds(0, 1, 0, 1)}, min_zoom=12, max_zoom=12)
+    path = _coverage_file(tmp_path, "wdw", {
+        "12": {"box": {"minX": 0, "maxX": 1, "minY": 0, "maxY": 1}, "tiles": 4,
+               "shape": "rectangle"}})
+    zooms, measured_against = load_coverage(path, "wdw")
+    plan = build_plan(park, VersionEntry(code="47"), coverage=zooms,
+                      coverage_version=measured_against)
+
+    assert measured_against is None
+    assert any("does not say which version" in note for note in plan.notes)
