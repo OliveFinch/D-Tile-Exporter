@@ -29,6 +29,9 @@ from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan
 from .progress import Progress
 from .state import default_state_path
 from .tdr import build_tdr_source, check_worker_quota, load_credentials, normalise_modes
+from .trace import TraceOptions, coverage_payload
+from .trace import estimate_requests as estimate_trace_requests
+from .trace import trace as trace_coverage
 from .urls import build_source
 from .util import human_bytes, sanitize_component
 from .verify import verify as verify_archive
@@ -399,6 +402,147 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trace(args: argparse.Namespace) -> int:
+    """Walk each zoom's coverage border and report the footprint it encloses.
+
+    Unlike ``discover`` this works for credentialled parks, which is the whole
+    reason it exists on this side rather than only in the browser tool: TDR's
+    tiles need signed cookies on the request, and an ``<img>`` cannot carry
+    them.
+    """
+    repo = repository_from(args)
+    park = repo.park(args.park)
+    version = repo.version(args.park, args.version)
+
+    # Every zoom with bounds, not just those inside the declared minZoom/maxZoom.
+    # `select_zooms` excludes the rest on the grounds that they are "not part of
+    # the map" -- reasonable when planning a download, wrong when the job is to
+    # find out what is actually served. Shanghai settled that: it declares
+    # minZoom 14 and serves z12 and z13 perfectly well. A measurement should not
+    # inherit the assumption it exists to test.
+    candidates = sorted(park.bounds_by_zoom)
+    if args.min_zoom is not None:
+        candidates = [z for z in candidates if z >= args.min_zoom]
+    if args.max_zoom is not None:
+        candidates = [z for z in candidates if z <= args.max_zoom]
+    zooms = [(z, park.bounds_at(z)) for z in candidates]
+    if not zooms:
+        raise TilearcError("no zoom levels with bounds to trace")
+    undeclared = [z for z, _b in zooms if z < park.min_zoom or z > park.max_zoom]
+
+    # -- sources ----------------------------------------------------------
+    if park.requires_credentials:
+        credentials = load_credentials(park, args.tdr_credentials, warn=warn)
+        expiry = credentials.expiry_warning()
+        if expiry:
+            warn(expiry)
+        modes = normalise_modes(args.mode)
+        sources = {
+            mode: build_tdr_source(park, version.code, mode, credentials, direct=args.direct)
+            for mode in modes
+        }
+    else:
+        sources = {"": build_source(park, version)}
+
+    options = TraceOptions(
+        margin=args.margin,
+        concurrency=args.concurrency,
+        rps=args.rps,
+        max_requests=args.max_requests,
+        max_regions=args.max_regions,
+    )
+    per_mode = estimate_trace_requests(zooms)
+    upper_bound = per_mode * len(sources)
+
+    info(f"park     {park.park_id}  {park.label}")
+    info(f"version  {version.code}")
+    if len(sources) > 1 or any(sources):
+        info(f"modes    {', '.join(m or 'default' for m in sources)}")
+    info(f"zooms    {', '.join(str(z) for z, _b in zooms)}")
+    if undeclared:
+        info(
+            f"         including z{', z'.join(str(z) for z in undeclared)}, outside the "
+            f"declared {park.min_zoom}-{park.max_zoom} range but with bounds to check"
+        )
+    info(f"cost     roughly {upper_bound:,} requests, scaling with perimeter not area")
+    info(f"polite   concurrency {options.concurrency}, {options.rps:g} req/s")
+
+    warnings: list[str] = []
+    if any(source.uses_shared_proxy for source in sources.values()):
+        # The border walk is a fraction of a download, but it is still someone
+        # else's shared Worker quota, and the same cap applies.
+        warnings.extend(
+            check_worker_quota(upper_bound, forced=args.force, cap=args.worker_max_tiles)
+        )
+        info("")
+        info(
+            "note     routed through the shared Worker, which answers 204 both for a "
+            "missing\n         tile and for an upstream refusal. Those are "
+            "indistinguishable here, so\n         every zoom is audited afterwards -- "
+            "and --direct is the better measurement."
+        )
+    for message in warnings:
+        warn(message)
+    info("")
+
+    if args.dry_run:
+        info("dry run -- stopping before any request")
+        return 0
+    if not _confirm("Walk the coverage border for these zooms?", args.yes):
+        info("aborted")
+        return 1
+
+    progress = Progress(upper_bound, enabled=not args.no_progress)
+    results: dict[str, list] = {}
+    for mode, source in sources.items():
+        results[mode] = asyncio.run(
+            trace_coverage(
+                source, zooms, options,
+                on_request=progress.tick,
+                on_zoom_done=lambda _t: None,
+            )
+        )
+    progress.close()
+
+    if args.json:
+        emit_json({
+            "park": park.park_id,
+            "version": version.code,
+            "requests": sum(t.requests for group in results.values() for t in group),
+            "modes": {mode or "default": coverage_payload(group) for mode, group in results.items()},
+        })
+        return 0
+
+    incomplete = 0
+    for mode, group in results.items():
+        info("")
+        if mode:
+            info(f"--- {mode}")
+        info(f"{'zoom':>5}  {'requests':>9}  {'footprint':<30} {'tiles':>9}  shape")
+        for item in group:
+            box = item.box
+            where = (
+                f"{box.min_x}-{box.max_x}, {box.min_y}-{box.max_y}" if box else "-"
+            )
+            info(f"{item.zoom:>5}  {item.requests:>9,}  {where:<30} {item.covered:>9,}  "
+                 f"{item.describe()}")
+            if not item.complete:
+                incomplete += 1
+            for run in item.runs() if item.regions and not item.rectangle else []:
+                info(f"{'':>5}  rows {run[0]}-{run[1]}: x {run[2]}-{run[3]}")
+
+    total = sum(t.covered for group in results.values() for t in group)
+    info("")
+    info(f"{sum(t.requests for g in results.values() for t in g):,} requests, "
+         f"{total:,} tiles across {len(zooms)} zoom(s)"
+         + (f" x {len(results)} modes" if len(results) > 1 else ""))
+    if incomplete:
+        warn(f"{incomplete} zoom(s) did not finish cleanly -- see the shape column. "
+             f"Those figures are floors, not measurements.")
+        return 1
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     report = verify_archive(args.path, deep=not args.quick)
     if args.json:
@@ -762,6 +906,56 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument("--json", action="store_true")
     add_source_args(discover_parser)
     discover_parser.set_defaults(func=cmd_discover)
+
+    trace_parser = subparsers.add_parser(
+        "trace",
+        help="walk each zoom's coverage border and report the real footprint",
+        description=(
+            "Follows the outline of the imagery tile by tile and fills what it "
+            "encloses, so an L-shaped or bitten footprint is reported as it is "
+            "rather than as the rectangle that bounds it. Costs the perimeter, "
+            "not the area. Unlike 'discover' this works for credentialled parks."
+        ),
+    )
+    trace_parser.add_argument("--park", required=True)
+    trace_parser.add_argument("--version", required=True)
+    trace_parser.add_argument("--min-zoom", type=int)
+    trace_parser.add_argument("--max-zoom", type=int)
+    trace_parser.add_argument(
+        "--margin", type=int, default=8,
+        help="how far outside the declared box the walk may stray (default 8 tiles)",
+    )
+    trace_parser.add_argument(
+        "--max-requests", type=int, default=60_000,
+        help="per-zoom ceiling, so a runaway walk cannot spend all night",
+    )
+    trace_parser.add_argument(
+        "--max-regions", type=int, default=6,
+        help="distinct regions to report per zoom before giving up looking (default 6)",
+    )
+    trace_parser.add_argument("--concurrency", type=int, default=6)
+    trace_parser.add_argument("--rps", type=float, default=12.0)
+    trace_parser.add_argument(
+        "--mode", default="both", help="TDR only: daytime, nighttime, or both",
+    )
+    trace_parser.add_argument(
+        "--direct", action="store_true",
+        help="TDR only: go to the origin with CloudFront cookies instead of the "
+             "shared Worker. Slower to set up, but a 403 is then distinguishable "
+             "from a missing tile, which the Worker's 204 is not.",
+    )
+    trace_parser.add_argument("--tdr-credentials")
+    trace_parser.add_argument(
+        "--worker-max-tiles", type=int, default=10_000,
+        help="safety cap on requests routed through the shared Worker",
+    )
+    trace_parser.add_argument("--force", action="store_true")
+    trace_parser.add_argument("-y", "--yes", action="store_true")
+    trace_parser.add_argument("--dry-run", action="store_true")
+    trace_parser.add_argument("--no-progress", action="store_true")
+    trace_parser.add_argument("--json", action="store_true")
+    add_source_args(trace_parser)
+    trace_parser.set_defaults(func=cmd_trace)
 
     verify = subparsers.add_parser("verify", help="check an archive's integrity")
     verify.add_argument("path")
