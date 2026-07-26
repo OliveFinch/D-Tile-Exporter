@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterator
 
 from .bounds import BBox, ZoomSelection, effective_bounds, iter_bounds, select_zooms
@@ -21,10 +22,26 @@ DEFAULT_BYTES_PER_TILE = 25_000
 class ZoomPlan:
     zoom: int
     bounds: TileBounds
+    #: Measured coverage as ``(y_from, y_to, x_from, x_to)`` runs, when the real
+    #: footprint is known and is not simply ``bounds``. Declared bounds are a
+    #: rectangle; the imagery inside one need not be. Hong Kong's z19 box is 15%
+    #: empty, and Disneyland Paris declares 14 times the tiles it serves.
+    runs: tuple[tuple[int, int, int, int], ...] | None = None
 
     @property
     def count(self) -> int:
-        return self.bounds.count
+        if self.runs is None:
+            return self.bounds.count
+        return sum((y1 - y0 + 1) * (x1 - x0 + 1) for y0, y1, x0, x1 in self.runs)
+
+    def iter_xy(self) -> Iterator[tuple[int, int]]:
+        if self.runs is None:
+            yield from iter_bounds(self.bounds)
+            return
+        for y0, y1, x0, x1 in self.runs:
+            for y in range(y0, y1 + 1):
+                for x in range(x0, x1 + 1):
+                    yield x, y
 
 
 @dataclass
@@ -75,7 +92,13 @@ class JobPlan:
             "y_scheme": self.park.y_scheme,
             "modes": sorted(self.modes),
             "bbox": self.bbox.as_list() if self.bbox else None,
-            "zooms": {str(zp.zoom): zp.bounds.as_dict() for zp in self.zooms},
+            "zooms": {
+                str(zp.zoom): {
+                    **zp.bounds.as_dict(),
+                    **({"runs": [list(r) for r in zp.runs]} if zp.runs else {}),
+                }
+                for zp in self.zooms
+            },
         }
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -91,11 +114,130 @@ class JobPlan:
         modes = self.modes or [""]
         for mode in modes:
             for zoom_plan in self.zooms:
-                for x, y in iter_bounds(zoom_plan.bounds):
+                for x, y in zoom_plan.iter_xy():
                     yield zoom_plan.zoom, x, y, mode
 
     def summary_rows(self) -> list[tuple[int, TileBounds, int]]:
         return [(zp.zoom, zp.bounds, zp.count) for zp in self.zooms]
+
+
+def load_coverage(path: str | Path, park_id: str) -> dict[int, dict]:
+    """Read one park's measured footprints from a coverage file.
+
+    The file is what ``tools/tile-border-trace.html`` and ``tilearc trace``
+    produce: for each zoom, either a box or explicit row runs.
+    """
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TilearcError(f"could not read coverage file {path}: {exc}") from exc
+
+    maps = payload.get("maps")
+    if not isinstance(maps, dict):
+        raise TilearcError(f"{path} has no 'maps' object; is it a coverage file?")
+    entry = maps.get(park_id)
+    if entry is None:
+        raise TilearcError(
+            f"{path} has no measured coverage for '{park_id}'. "
+            f"It covers: {', '.join(sorted(maps)) or '(nothing)'}"
+        )
+    zooms = entry.get("zooms") or {}
+    out: dict[int, dict] = {}
+    for key, value in zooms.items():
+        try:
+            out[int(key)] = value
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def apply_coverage(
+    zoom_plans: list[ZoomPlan], coverage: dict[int, dict], notes: list[str]
+) -> list[ZoomPlan]:
+    """Replace declared rectangles with what was actually measured.
+
+    Both directions matter, and they fail differently. Where the declared box is
+    too wide the job asks for tiles nobody drew -- wasteful, and every one comes
+    back as a recorded absence. Where it is too narrow the job never asks at
+    all, and the archive is quietly short: WDW z12's declared minX is four
+    columns east of where its imagery starts.
+
+    A zoom with no measurement keeps its declared bounds and is named in the
+    notes, because silently trusting a rectangle is exactly what this is for.
+    """
+    applied: list[ZoomPlan] = []
+    unmeasured: list[int] = []
+    widened: list[str] = []
+    narrowed = 0
+    planned = {zoom_plan.zoom for zoom_plan in zoom_plans}
+
+    for zoom_plan in zoom_plans:
+        entry = coverage.get(zoom_plan.zoom)
+        if entry is None:
+            unmeasured.append(zoom_plan.zoom)
+            applied.append(zoom_plan)
+            continue
+
+        if entry.get("shape") == "empty" or not entry.get("box"):
+            widened.append(f"z{zoom_plan.zoom} serves nothing and was dropped")
+            continue
+
+        box = entry["box"]
+        measured = TileBounds(box["minX"], box["maxX"], box["minY"], box["maxY"])
+        runs = entry.get("runs")
+        plan = ZoomPlan(
+            zoom=zoom_plan.zoom,
+            bounds=measured,
+            runs=tuple(tuple(run) for run in runs) if runs else None,
+        )
+        declared = zoom_plan.bounds
+        if (measured.min_x < declared.min_x or measured.max_x > declared.max_x
+                or measured.min_y < declared.min_y or measured.max_y > declared.max_y):
+            widened.append(
+                f"z{zoom_plan.zoom} extends past its declared bounds "
+                f"({declared.min_x}-{declared.max_x}, {declared.min_y}-{declared.max_y}"
+                f" -> {measured.min_x}-{measured.max_x}, {measured.min_y}-{measured.max_y})"
+            )
+        if plan.count < zoom_plan.count:
+            narrowed += zoom_plan.count - plan.count
+        applied.append(plan)
+
+    # Zooms the config's minZoom/maxZoom exclude but the server demonstrably
+    # serves. `select_zooms` drops them on the reasonable assumption that the
+    # declared range is the map -- Shanghai declares minZoom 14 and serves z12
+    # and z13, and Tokyo declares 16 and serves z15. A measurement outranks the
+    # assumption it was taken to test.
+    for zoom in sorted(set(coverage) - planned):
+        entry = coverage[zoom]
+        if entry.get("shape") == "empty" or not entry.get("box"):
+            continue
+        box = entry["box"]
+        runs = entry.get("runs")
+        applied.append(ZoomPlan(
+            zoom=zoom,
+            bounds=TileBounds(box["minX"], box["maxX"], box["minY"], box["maxY"]),
+            runs=tuple(tuple(run) for run in runs) if runs else None,
+        ))
+        widened.append(
+            f"z{zoom} is outside the declared zoom range but serves "
+            f"{entry.get('tiles', 0):,} tile(s), so it was added"
+        )
+    applied.sort(key=lambda zoom_plan: zoom_plan.zoom)
+
+    if narrowed:
+        notes.append(
+            f"measured coverage removed {narrowed:,} tile(s) the declared bounds "
+            f"claim but the server does not serve"
+        )
+    for message in widened:
+        notes.append("measured coverage: " + message)
+    if unmeasured:
+        notes.append(
+            "no measured coverage for zoom(s) "
+            + ", ".join(str(z) for z in unmeasured)
+            + "; their declared bounds are used unchecked"
+        )
+    return applied
 
 
 def build_plan(
@@ -107,6 +249,7 @@ def build_plan(
     bbox: BBox | None = None,
     modes: list[str] | None = None,
     allow_tms_bbox: bool = False,
+    coverage: dict[int, dict] | None = None,
 ) -> JobPlan:
     notes: list[str] = []
 
@@ -134,6 +277,15 @@ def build_plan(
             clipped_out.append(zoom)
             continue
         zoom_plans.append(ZoomPlan(zoom=zoom, bounds=bounds))
+
+    if coverage is not None:
+        if min_zoom is not None or max_zoom is not None:
+            coverage = {
+                zoom: entry for zoom, entry in coverage.items()
+                if (min_zoom is None or zoom >= min_zoom)
+                and (max_zoom is None or zoom <= max_zoom)
+            }
+        zoom_plans = apply_coverage(zoom_plans, coverage, notes)
 
     if clipped_out:
         notes.append(

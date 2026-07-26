@@ -25,7 +25,7 @@ from .doctor import check_park, worst_severity
 from .downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
 from .errors import ConfigError, QuotaError, TilearcError
 from .job import JobRequest, run_job
-from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan
+from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan, load_coverage
 from .progress import Progress
 from .state import default_state_path
 from .tdr import (
@@ -113,6 +113,15 @@ def add_selection_args(parser: argparse.ArgumentParser) -> None:
         default="daytime",
         help="TDR only: daytime, nighttime, or both",
     )
+    group.add_argument(
+        "--coverage",
+        default=os.environ.get("TILEARC_COVERAGE"),
+        help="a measured-coverage JSON file (see tools/measured-coverage.json). "
+             "Plans from what the server actually serves rather than what the "
+             "config declares -- which both stops the job asking for tiles that "
+             "do not exist and stops it missing tiles that do. "
+             "Env: TILEARC_COVERAGE",
+    )
 
 
 def repository_from(args: argparse.Namespace) -> ParkRepository:
@@ -135,9 +144,15 @@ def plan_from(args: argparse.Namespace, repo: ParkRepository) -> JobPlan:
 
     modes = normalise_modes(args.mode) if park.requires_credentials else []
 
+    coverage = None
+    path = getattr(args, "coverage", None)
+    if path:
+        coverage = load_coverage(path, park.park_id)
+
     return build_plan(
         park,
         version,
+        coverage=coverage,
         min_zoom=min_zoom,
         max_zoom=max_zoom,
         bbox=bbox,
