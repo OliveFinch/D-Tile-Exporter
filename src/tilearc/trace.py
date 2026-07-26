@@ -111,12 +111,15 @@ class BatchProbe:
     mode: str
     #: Cloudflare's free tier allows 50 subrequests per invocation.
     limit: int = 48
+    #: Bearer token, when the endpoint is guarded by one.
+    token: str | None = None
 
     async def check(
         self, client: httpx.AsyncClient, zoom: int, points: Sequence[tuple[int, int]]
     ) -> list[str]:
         response = await client.post(
             self.url,
+            headers={"Authorization": f"Bearer {self.token}"} if self.token else {},
             json={
                 "sid": self.server_id,
                 "mode": self.mode,

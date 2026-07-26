@@ -31,22 +31,50 @@
  * Upstream is asked with `Range: bytes=0-0`, so this costs a header round trip
  * per tile rather than a JPEG. Existence is all we are asking about.
  *
- * ## Mounting it
+ * ## Deploy it as its own Worker
  *
- * In the Worker's existing fetch handler, before the tile-proxy route:
+ * Recommended over adding a route to the Worker the app depends on. Not because
+ * the code is risky, but because a bad deploy on a measuring tool breaks a
+ * measuring tool, and this one is finished with once the boundaries are known —
+ * `wrangler delete` and it is gone.
+ *
+ * Note that Cloudflare's free-tier request allowance is per account, not per
+ * Worker, so a second Worker costs nothing in quota. Sharing one buys nothing
+ * back.
+ *
+ *     wrangler deploy                        # this file as the entrypoint
+ *     wrangler secret put CF_POLICY
+ *     wrangler secret put CF_SIGNATURE
+ *     wrangler secret put CF_KEY_PAIR_ID
+ *     wrangler secret put EXISTS_TOKEN       # see below
+ *
+ * The cost of a separate Worker is that the CloudFront cookies now live in two
+ * places, and TDR's expire — when they rotate, both need updating. That is the
+ * trade for not touching production routing.
+ *
+ * ## Or as a route on the existing Worker
+ *
+ * If you would rather keep the secrets in one place, mount it before the
+ * tile-proxy route. Match the path exactly rather than with endsWith, so a tile
+ * path can never fall through to it:
  *
  *     import { handleExists, EXISTS_PATH } from "./exists.js";
  *
- *     if (url.pathname.endsWith(EXISTS_PATH)) {
+ *     if (new URL(request.url).pathname === EXISTS_PATH) {
  *       return handleExists(request, env);
  *     }
  *
- * `env` needs the same CloudFront values the tile proxy already uses:
- * `CF_POLICY`, `CF_SIGNATURE`, `CF_KEY_PAIR_ID`, and optionally `TDR_ORIGIN_BASE`
- * and `TDR_USER_AGENT`. Nothing new to configure if the proxy works.
+ * Either way `env` needs the same CloudFront values the tile proxy already
+ * uses: `CF_POLICY`, `CF_SIGNATURE`, `CF_KEY_PAIR_ID`, optionally
+ * `TDR_ORIGIN_BASE`, `TDR_USER_AGENT`, `TDR_REFERER`.
  *
- * Keep it behind whatever guard the rest of the Worker uses. It is far cheaper
- * per tile than the proxy, which also makes it a cheaper thing to abuse.
+ * ## EXISTS_TOKEN
+ *
+ * Set it and callers must send `Authorization: Bearer <token>`. Worth doing:
+ * one call here fans out 48 upstream requests, which makes this a cheaper thing
+ * to point at Disney's origin than the tile proxy is. Leave it unset and the
+ * endpoint is open, which is fine behind other access controls and not
+ * otherwise.
  */
 
 export const EXISTS_PATH = "/exists";
@@ -89,6 +117,12 @@ export async function handleExists(request, env) {
   }
   if (request.method !== "POST") {
     return json({ error: "POST a JSON body" }, 405);
+  }
+  if (env.EXISTS_TOKEN) {
+    const offered = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    if (!timingSafeEqual(offered, env.EXISTS_TOKEN)) {
+      return json({ error: "bad or missing bearer token" }, 401);
+    }
   }
 
   let body;
@@ -164,6 +198,14 @@ export async function handleExists(request, env) {
 }
 
 const count = (text, char) => text.split(char).length - 1;
+
+/** Compare without leaking the answer through how long it took. */
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 
 async function probe(url, headers) {
   let response;

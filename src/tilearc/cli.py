@@ -546,6 +546,7 @@ def cmd_trace(args: argparse.Namespace) -> int:
                 ),
                 mode=mode or "daytime",
                 limit=args.probe_batch,
+                token=args.probe_token,
             )
         results[mode] = asyncio.run(
             trace_coverage(
@@ -1004,6 +1005,12 @@ def build_parser() -> argparse.ArgumentParser:
              "tools/worker-exists-endpoint.js). Asks about tiles in bulk, so a trace "
              "costs hundreds of Worker requests instead of tens of thousands, and a "
              "refusal comes back as a refusal instead of as a missing tile.",
+    )
+    trace_parser.add_argument(
+        "--probe-token",
+        default=os.environ.get("TILEARC_PROBE_TOKEN"),
+        help="bearer token for --probe-url, if the endpoint is guarded. "
+             "Env: TILEARC_PROBE_TOKEN",
     )
     trace_parser.add_argument(
         "--probe-batch", type=int, default=48,

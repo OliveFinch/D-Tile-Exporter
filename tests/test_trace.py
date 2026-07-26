@@ -442,3 +442,41 @@ def test_chunks_respect_the_subrequest_limit():
 
     asyncio.run(go())
     assert seen and max(seen) <= 10
+
+
+def test_a_guarded_endpoint_gets_the_bearer_token():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization", ""))
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"verdicts": "A" * len(body["tiles"])})
+
+    probe = BatchProbe(
+        url="https://worker.test/exists", server_id="1", mode="daytime", token="s3cret"
+    )
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(10, DECLARED)], TraceOptions(rps=0), client=client, batch=probe
+            )
+
+    asyncio.run(go())
+    assert seen and all(header == "Bearer s3cret" for header in seen)
+
+
+def test_an_unauthorised_endpoint_says_so_rather_than_reporting_an_empty_map():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="bad or missing bearer token")
+
+    probe = BatchProbe(url="https://worker.test/exists", server_id="1", mode="daytime")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await trace(
+                source(), [(10, DECLARED)], TraceOptions(rps=0), client=client, batch=probe
+            )
+
+    with pytest.raises(TraceRefused, match="401"):
+        asyncio.run(go())

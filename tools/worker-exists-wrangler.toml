@@ -1,0 +1,26 @@
+# Deploy tools/worker-exists-endpoint.js as a Worker of its own.
+#
+#   cp tools/worker-exists-endpoint.js exists.js
+#   cp tools/worker-exists-wrangler.toml wrangler.toml
+#   wrangler secret put CF_POLICY
+#   wrangler secret put CF_SIGNATURE
+#   wrangler secret put CF_KEY_PAIR_ID
+#   wrangler secret put EXISTS_TOKEN
+#   wrangler deploy
+#
+# Then delete it when the boundaries are known:  wrangler delete
+#
+# Nothing here touches the Worker Magic Parks Explorer depends on.
+
+name = "tdr-exists"
+main = "exists.js"
+compatibility_date = "2026-01-01"
+
+# Secrets are set with `wrangler secret put`, never in this file:
+#   CF_POLICY, CF_SIGNATURE, CF_KEY_PAIR_ID   -- same values the tile proxy uses
+#   EXISTS_TOKEN                              -- optional bearer token
+#
+# Optional, only if the origin differs from the built-in default:
+# [vars]
+# TDR_ORIGIN_BASE = "https://contents-portal.tokyodisneyresort.jp/limited/map-image/{serverId}/{mode}/"
+# TDR_USER_AGENT = "TokyoDisneyResortApp/3.11.8 Android/14"
