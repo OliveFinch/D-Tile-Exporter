@@ -839,8 +839,44 @@
   function loadRows() {
     try {
       const raw = JSON.parse(localStorage.getItem(STORE));
-      return Array.isArray(raw) ? raw : [];
+      return Array.isArray(raw) ? migrate(raw) : [];
     } catch (e) { return []; }
+  }
+
+  // Rows saved by older versions of this page are still good measurements;
+  // they just predate fields that were added later. Bring them forward rather
+  // than making someone re-run a night's work to get a column.
+  function migrate(raw) {
+    // Newest answer per map and zoom. Duplicates could be written before
+    // `putRow`, and a stale one left in place is worse than no row at all.
+    const best = new Map();
+    for (const row of raw) {
+      const key = `${row.parkId || row.map}|${row.z}`;
+      const held = best.get(key);
+      if (!held || String(row.at || "") > String(held.at || "")) best.set(key, row);
+    }
+
+    return [...best.values()].map((row) => {
+      const out = { ...row };
+      if (!out.parkId) {
+        const park = PARKS.find((p) => p.label === out.map);
+        if (park) out.parkId = park.id;
+      }
+      // `covered` arrived with the fill. For a row that traced to one clean
+      // rectangle it is exactly the box, so it can be recovered for free.
+      // Anything else genuinely is not known, and is left open to re-check
+      // rather than filled in with a guess.
+      if (!out.covered && out.traced && out.traced !== "—" && out.text === "a rectangle") {
+        const [xs, ys] = out.traced.split(", ");
+        const [minX, maxX] = xs.split("-").map(Number);
+        const [minY, maxY] = ys.split("-").map(Number);
+        if ([minX, maxX, minY, maxY].every(Number.isFinite)) {
+          out.covered = (maxX - minX + 1) * (maxY - minY + 1);
+          out.clean = true;
+        }
+      }
+      return out;
+    });
   }
   function saveRows() {
     try { localStorage.setItem(STORE, JSON.stringify(rows)); } catch (e) { /* quota, private mode */ }
@@ -899,25 +935,27 @@
       && r.regions.every((g) => g.rectangle && !g.clipped.length);
   }
 
-  function addRow(parkId, mapLabel, r) {
-    const row = buildRow(parkId, mapLabel, r);
-    rows.push(row);
-    renderRow(row);
-    saveRows();
-    refreshResultButtons();
-  }
+  //: One row per map and zoom, always. A map and a zoom is a question with one
+  //  answer, and keeping two of them means keeping a stale one that looks
+  //  exactly like the fresh one -- and, worse, one that a re-check can never
+  //  clear, because re-measuring writes to the other copy.
+  const sameZoom = (row, parkId, mapLabel, z) =>
+    +row.z === +z && (row.parkId ? row.parkId === parkId : row.map === mapLabel);
 
-  // Re-measuring an existing zoom replaces it. Appending would leave the table
-  // holding two answers for one question, and the stale one indistinguishable
-  // from the fresh one at a glance.
-  function replaceRow(parkId, mapLabel, r) {
+  function putRow(parkId, mapLabel, r) {
     const row = buildRow(parkId, mapLabel, r);
-    const at = rows.findIndex((x) => x.map === mapLabel && +x.z === +r.z);
-    if (at === -1) rows.push(row); else rows[at] = row;
-    redrawRows();
+    const at = rows.findIndex((x) => sameZoom(x, parkId, mapLabel, r.z));
+    if (at === -1) {
+      rows.push(row);
+      renderRow(row);
+    } else {
+      rows[at] = row;
+      redrawRows();
+    }
     saveRows();
     refreshResultButtons();
   }
+  const addRow = putRow, replaceRow = putRow;
 
   function tsv() {
     const head = ["map", "zoom", "requests", "regions", "border tiles", "covered tiles",
@@ -1285,9 +1323,14 @@
   });
 
   rows = loadRows();
-  for (const row of rows) renderRow(row);
+  redrawRows();
   refreshResultButtons();
-  if (rows.length) $("status").textContent = `${rows.length} result(s) restored from the last run.`;
+  // Migration can drop duplicates and fill in columns, so write the tidied
+  // set straight back rather than leaving the old shape on disk.
+  if (rows.length) {
+    saveRows();
+    $("status").textContent = `${rows.length} result(s) restored from the last run.`;
+  }
   applyPark(PARKS[0]);
 })();
 </script>
