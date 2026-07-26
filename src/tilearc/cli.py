@@ -726,6 +726,32 @@ def _confirm(prompt: str, assume_yes: bool) -> bool:
     return answer in ("y", "yes")
 
 
+def _refuse_rehosted(plan: JobPlan, allow: bool) -> None:
+    """Stop a job pointed at someone's own copy rather than at the origin.
+
+    A version carrying its own `url` is served from somewhere other than the
+    park's host. Sometimes that is the real source; DLP's `jan2026` is not --
+    it is a copy already downloaded and re-hosted, so archiving it captures a
+    snapshot of the archive rather than of the map.
+
+    Refused rather than skipped, because which of those a given override is
+    cannot be decided from here.
+    """
+    override = plan.version.url
+    if not override or allow:
+        return
+    from urllib.parse import urlparse
+
+    park_host = urlparse(plan.park.tile_template or "").hostname or "(none)"
+    other_host = urlparse(override).hostname or override
+    raise TilearcError(
+        f"version '{plan.version.code}' of {plan.park.park_id} is served from "
+        f"{other_host}, not the park's own {park_host}. A version with its own url "
+        f"is often a re-host of tiles someone already downloaded -- archiving it "
+        f"copies a copy. Pass --allow-rehosted if this one really is the source."
+    )
+
+
 def cmd_download(args: argparse.Namespace) -> int:
     repo = repository_from(args)
     plan = plan_from(args, repo)
@@ -736,6 +762,8 @@ def cmd_download(args: argparse.Namespace) -> int:
             "nothing to download: no zoom level has usable bounds. "
             + " ".join(plan.notes)
         )
+
+    _refuse_rehosted(plan, args.allow_rehosted)
 
     # -- build the tile source(s) ----------------------------------------
     sources: dict[str, str] = {}
@@ -947,6 +975,17 @@ def build_parser() -> argparse.ArgumentParser:
     download = subparsers.add_parser("download", help="archive a version's tiles")
     download.add_argument("--park", required=True)
     download.add_argument("--version", required=True)
+    download.add_argument(
+        "--allow-rehosted", action="store_true",
+        help="permit a version whose url points away from the park's own host. "
+             "Such a version is often a copy someone re-hosted rather than the "
+             "original source.",
+    )
+    download.add_argument(
+        "--snapshot-date",
+        help="for a park with no version history (DLP), the date this snapshot is "
+             "filed under in a library. Defaults to today (UTC).",
+    )
     download.add_argument(
         "--format", choices=FORMATS, default="zip",
         help="zip, dir, mbtiles, or library. 'library' writes into a shared tree "

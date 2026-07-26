@@ -244,11 +244,27 @@ def test_download_prints_the_user_agent(capsys, tmp_path):
 def test_download_shows_the_resolved_url_template(capsys, tmp_path):
     _code, _out, err = run(
         capsys, "download", "--park", "dlp", "--version", "jan2026", "--max-zoom", "13",
-        "--dry-run", "-o", str(tmp_path / "a.zip"),
+        "--allow-rehosted", "--dry-run", "-o", str(tmp_path / "a.zip"),
     )
     assert "pub-" in err                          # the R2 override, not the CDN
     assert "media.disneylandparis.com" not in err
     assert "overrides the park tile template" in err
+
+
+def test_a_version_hosted_off_the_park_s_own_domain_is_refused(capsys, tmp_path):
+    """DLP's jan2026 is a copy already downloaded and re-hosted on R2.
+
+    Archiving it snapshots the archive rather than the map, so it takes saying
+    so out loud. The override itself stays legal -- the test above passes
+    --allow-rehosted and still gets the R2 URL.
+    """
+    code, _out, err = run(
+        capsys, "download", "--park", "dlp", "--version", "jan2026", "--max-zoom", "13",
+        "--dry-run", "-o", str(tmp_path / "a.zip"),
+    )
+    assert code != 0
+    assert "r2.dev" in err and "media.disneylandparis.com" in err
+    assert "--allow-rehosted" in err
 
 
 # ---------------------------------------------------------------------------

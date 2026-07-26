@@ -34,6 +34,9 @@ class JobRequest:
     #: Drop recorded "no imagery" verdicts before starting, so they are asked
     #: for again. Keeps downloaded tiles, unlike ``restart``.
     retry_missing: bool = False
+    #: For a park with no version history, the date this snapshot is filed
+    #: under. Defaults to today.
+    snapshot_date: str | None = None
 
     def resolved_output(self) -> Path:
         return Path(self.output) if self.output else default_output(self.plan, self.fmt)
@@ -41,7 +44,19 @@ class JobRequest:
     def resolved_state_path(self) -> Path:
         if self.state_path:
             return Path(self.state_path)
-        return default_state_path(self.resolved_output())
+        output = self.resolved_output()
+        if self.fmt == "library":
+            # A library root is shared by every park and version in it, so
+            # deriving the state path from the output alone gives every job the
+            # same file -- and the second one refuses to start because it finds
+            # the first one's job in it. The tiles are filed per park and
+            # version; the resume state has to be too.
+            from .library import archive_version
+
+            return default_state_path(
+                output / self.plan.park.park_id / archive_version(self.plan, self.snapshot_date)
+            )
+        return default_state_path(output)
 
 
 @dataclass
@@ -87,7 +102,7 @@ async def run_job(
     state_path = request.resolved_state_path()
     started_at = utcnow()
 
-    writer = build_writer(request.fmt, output, plan)
+    writer = build_writer(request.fmt, output, plan, snapshot_date=request.snapshot_date)
     state = JobState(state_path)
 
     descriptor = {
