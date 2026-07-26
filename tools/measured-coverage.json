@@ -2,8 +2,8 @@
   "$comment": "Measured tile coverage for the public Disney park maps. Produced by tools/tile-border-trace.html and tools/coverage-extract.html by walking each zoom's border; everything a border encloses is imagery. Coordinates are inclusive, in server tile space (SHDR is TMS, already unflipped). runs are [yFrom, yTo, xFrom, xTo]: every row in the group is covered by that one contiguous x range. A rectangle is fully described by its box.",
   "measured": "2026-07-26",
   "tool": "tile-border-trace / coverage-extract",
-  "generated": "2026-07-26T11:37:54+00:00",
-  "totalTiles": 1097930,
+  "generated": "2026-07-26T18:17:52+00:00",
+  "totalTiles": 1114310,
   "maps": {
     "wdw": {
       "name": "Walt Disney World",
@@ -533,6 +533,77 @@
             "maxY": 56767
           },
           "tiles": 9312,
+          "shape": "rectangle"
+        }
+      }
+    },
+    "tdr": {
+      "name": "Tokyo Disney Resort",
+      "tiles": 16380,
+      "note": "Measured on the daytime tile set through the viewer's own tile proxy. Nighttime is a separate tile set and is assumed to share this footprint; that assumption has not been measured. Every zoom sits well inside its declared bounds, and z15 -- below the declared minZoom of 16 -- does serve tiles.",
+      "modes": [
+        "daytime",
+        "nighttime"
+      ],
+      "zooms": {
+        "15": {
+          "box": {
+            "minX": 29115,
+            "maxX": 29117,
+            "minY": 12907,
+            "maxY": 12910
+          },
+          "tiles": 12,
+          "shape": "rectangle"
+        },
+        "16": {
+          "box": {
+            "minX": 58230,
+            "maxX": 58235,
+            "minY": 25814,
+            "maxY": 25821
+          },
+          "tiles": 48,
+          "shape": "rectangle"
+        },
+        "17": {
+          "box": {
+            "minX": 116460,
+            "maxX": 116471,
+            "minY": 51628,
+            "maxY": 51643
+          },
+          "tiles": 192,
+          "shape": "rectangle"
+        },
+        "18": {
+          "box": {
+            "minX": 232920,
+            "maxX": 232943,
+            "minY": 103256,
+            "maxY": 103287
+          },
+          "tiles": 768,
+          "shape": "rectangle"
+        },
+        "19": {
+          "box": {
+            "minX": 465840,
+            "maxX": 465887,
+            "minY": 206512,
+            "maxY": 206575
+          },
+          "tiles": 3072,
+          "shape": "rectangle"
+        },
+        "20": {
+          "box": {
+            "minX": 931680,
+            "maxX": 931775,
+            "minY": 413024,
+            "maxY": 413151
+          },
+          "tiles": 12288,
           "shape": "rectangle"
         }
       }

@@ -597,6 +597,73 @@ def cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_library(args: argparse.Namespace) -> int:
+    """Report on, or query, a library tree's catalogue."""
+    from .library import Catalogue, human_saving
+
+    root = Path(args.root)
+    if not (root / "catalogue.sqlite").is_file():
+        raise TilearcError(
+            f"no catalogue at {root / 'catalogue.sqlite'}. Download with "
+            f"--format library --output {root} first."
+        )
+    catalogue = Catalogue(root)
+    try:
+        # -- resolve one tile ---------------------------------------------
+        if args.resolve:
+            try:
+                park, version, z, x, y = args.resolve
+                path = catalogue.resolve(park, version, int(z), int(x), int(y), args.mode or "")
+            except ValueError as exc:
+                raise TilearcError(f"--resolve wants PARK VERSION Z X Y: {exc}") from exc
+            if path is None:
+                info("not in the library")
+                return 1
+            print(path)
+            return 0
+
+        # -- dump the index -----------------------------------------------
+        if args.export:
+            payload = catalogue.export_index(args.park)
+            Path(args.export).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            info(f"wrote {args.export}")
+            return 0
+
+        stats = catalogue.stats()
+        if args.park:
+            stats = [row for row in stats if row["park"] == args.park]
+        if args.json:
+            emit_json({"root": str(root), "versions": stats, "totals": human_saving(stats)})
+            return 0
+
+        if not stats:
+            info("the library is empty")
+            return 0
+
+        info(f"{root}")
+        info("")
+        info(f"{'park':<6} {'version':<18} {'tiles':>10} {'stored here':>12} "
+             f"{'reused':>9} {'on disk':>10}")
+        for row in stats:
+            reused = row["tiles"] - row["stored"]
+            info(f"{row['park']:<6} {row['version']:<18} {row['tiles']:>10,} "
+                 f"{row['stored']:>12,} {reused:>9,} "
+                 f"{human_bytes(row['stored_bytes'] or 0):>10}")
+
+        totals = human_saving(stats)
+        info("")
+        info(f"on disk  {human_bytes(totals['storedBytes'])}")
+        info(f"as if every version were archived separately  "
+             f"{human_bytes(totals['logicalBytes'])}")
+        if totals["logicalBytes"]:
+            saved = totals["savedBytes"] / totals["logicalBytes"] * 100
+            info(f"saved by not storing unchanged tiles twice  "
+                 f"{human_bytes(totals['savedBytes'])} ({saved:.0f}%)")
+        return 0
+    finally:
+        catalogue.close()
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     report = verify_archive(args.path, deep=not args.quick)
     if args.json:
@@ -864,7 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
     download = subparsers.add_parser("download", help="archive a version's tiles")
     download.add_argument("--park", required=True)
     download.add_argument("--version", required=True)
-    download.add_argument("--format", choices=FORMATS, default="zip")
+    download.add_argument(
+        "--format", choices=FORMATS, default="zip",
+        help="zip, dir, mbtiles, or library. 'library' writes into a shared tree "
+             "at --output, storing a tile only when its bytes differ from what an "
+             "earlier version already holds, and indexing every version's tiles in "
+             "a catalogue so a reader can find them.",
+    )
     download.add_argument("-o", "--output", help="output path (default: {park}_{version}.zip)")
     add_selection_args(download)
 
@@ -1032,6 +1105,31 @@ def build_parser() -> argparse.ArgumentParser:
     trace_parser.add_argument("--json", action="store_true")
     add_source_args(trace_parser)
     trace_parser.set_defaults(func=cmd_trace)
+
+    library = subparsers.add_parser(
+        "library",
+        help="report on a multi-version library tree",
+        description=(
+            "A library stores each version's tiles only where they differ from an "
+            "earlier version, and indexes every version's tiles in a catalogue so a "
+            "reader can find bytes that live under another version's folder. This "
+            "reports what is held, and can resolve individual tiles."
+        ),
+    )
+    library.add_argument("--root", default="library", help="the library directory")
+    library.add_argument("--park", help="limit the report to one park")
+    library.add_argument(
+        "--resolve", nargs=5, metavar=("PARK", "VERSION", "Z", "X", "Y"),
+        help="print the file holding one tile, wherever it actually lives",
+    )
+    library.add_argument("--mode", default="", help="TDR only: daytime or nighttime")
+    library.add_argument(
+        "--export", metavar="FILE",
+        help="write a JSON index of where every tile lives, for a reader that is "
+             "not SQLite",
+    )
+    library.add_argument("--json", action="store_true")
+    library.set_defaults(func=cmd_library)
 
     verify = subparsers.add_parser("verify", help="check an archive's integrity")
     verify.add_argument("path")
