@@ -567,3 +567,58 @@ def test_measure_asks_before_spending_requests(qapp, context, monkeypatch):
 
     assert called == [], "cancelling must not send any requests"
     assert asked and "requests" in asked[0]
+
+
+# ---------------------------------------------------------------------------
+# the library format's two different paths
+# ---------------------------------------------------------------------------
+
+
+def _plan(*, park_id: str, version: str):
+    from tilearc.config import ParkConfig, TileBounds, VersionEntry
+    from tilearc.plan import JobPlan, ZoomPlan
+
+    park = ParkConfig(
+        park_id=park_id, label=park_id.upper(), tile_template="t",
+        min_zoom=11, max_zoom=11, y_scheme="xyz",
+        bounds_by_zoom={11: TileBounds(0, 1, 0, 1)},
+    )
+    return JobPlan(park=park, version=VersionEntry(code=version),
+                   zooms=[ZoomPlan(11, TileBounds(0, 1, 0, 1))], modes=[])
+
+
+def _select_format(tab, value):
+    index = tab.format_combo.findData(value)
+    assert index >= 0, f"no {value!r} in the format picker"
+    tab.format_combo.setCurrentIndex(index)
+
+
+def test_library_format_hands_the_writer_the_root_not_the_version_folder(qapp, context, tmp_path):
+    """The writer appends {park}/{version} itself.
+
+    Handing it the displayed path would bury the tiles under wdw/47/wdw/47 --
+    the shape of mistake that only shows up once a download has been running
+    for an hour.
+    """
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    tab.destination = tmp_path
+    _select_format(tab, "library")
+
+    assert tab._job_output() == tmp_path
+    assert tab._output_path() == tmp_path / "wdw" / "47"
+
+
+def test_the_other_formats_are_unchanged_by_that(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    tab.destination = tmp_path
+
+    _select_format(tab, "dir")
+    assert tab._job_output() == tab._output_path() == tmp_path / "wdw_47"
+
+    _select_format(tab, "zip")
+    assert tab._job_output() == tab._output_path() == tmp_path / "wdw_47.zip"
+
+    _select_format(tab, "mbtiles")
+    assert tab._job_output() == tab._output_path() == tmp_path / "wdw_47.mbtiles"
