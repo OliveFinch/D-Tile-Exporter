@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -19,6 +16,7 @@ from .context import AppContext
 from .doctor_tab import DoctorTab
 from .download_tab import DownloadTab
 from .library_tab import LibraryTab
+from .pickers import choose_directory
 from .verify_tab import VerifyTab
 
 
@@ -85,9 +83,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _use_local(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
+        chosen = choose_directory(
             self, "Choose a checkout of the viewer repo (or its parks folder)"
         )
         if chosen:
-            self.context.use_directory(Path(chosen))
+            self.context.use_directory(chosen)
             self.source_label.setText(self.context.description)

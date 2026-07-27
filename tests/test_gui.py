@@ -991,3 +991,153 @@ def test_the_window_has_a_library_tab_wired_to_the_download(qapp, context, monke
     monkeypatch.setattr(window.library_tab, "set_root", lambda root: seen.append(root))
     window.download_tab.library_written.emit("/somewhere")
     assert seen == ["/somewhere"]
+
+
+# ---------------------------------------------------------------------------
+# choosing a folder without the system's folder panel
+# ---------------------------------------------------------------------------
+
+
+def _drop(widget, path):
+    """Deliver a real drag of `path` onto `widget`."""
+    from PySide6.QtCore import QMimeData, QPointF, QUrl, Qt
+    from PySide6.QtGui import QDragEnterEvent, QDropEvent
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    enter = QDragEnterEvent(
+        QPointF(1, 1).toPoint(), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier
+    )
+    widget.dragEnterEvent(enter)
+    drop = QDropEvent(
+        QPointF(1, 1), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier
+    )
+    widget.dropEvent(drop)
+    return enter, drop
+
+
+def test_qt_dialogs_can_be_asked_for(monkeypatch):
+    """macOS draws its panel in another process, which can wedge.
+
+    Qt's own dialog is drawn here and cannot hang on a service it never
+    contacts, so there has to be a way to ask for it.
+    """
+    from PySide6.QtWidgets import QFileDialog
+    from tilearc_gui import pickers
+
+    monkeypatch.delenv(pickers.ENV_QT_DIALOGS, raising=False)
+    assert pickers.prefers_qt_dialogs() is False
+    assert pickers._options() == QFileDialog.Option(0)
+
+    for off in ("0", "no", "false", ""):
+        monkeypatch.setenv(pickers.ENV_QT_DIALOGS, off)
+        assert pickers.prefers_qt_dialogs() is False
+
+    monkeypatch.setenv(pickers.ENV_QT_DIALOGS, "1")
+    assert pickers.prefers_qt_dialogs() is True
+    assert pickers._options() == QFileDialog.Option.DontUseNativeDialog
+
+
+def test_a_dropped_file_means_the_folder_holding_it(qapp, tmp_path):
+    from PySide6.QtCore import QMimeData, QUrl
+    from tilearc_gui.pickers import dropped_directory
+
+    tile = tmp_path / "851.jpg"
+    tile.write_bytes(b"x")
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(tile))])
+    assert dropped_directory(mime) == tmp_path
+
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path))])
+    assert dropped_directory(mime) == tmp_path
+
+    assert dropped_directory(QMimeData()) is None
+
+
+def test_a_destination_can_be_typed_instead_of_browsed(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    _select_format(tab, "library")
+
+    tab.destination_edit.setText(str(tmp_path))
+    tab.destination_edit.editingFinished.emit()
+
+    assert tab.destination == tmp_path
+    assert tab._job_output() == tmp_path
+    assert str(tmp_path / "wdw" / "47") in tab.destination_label.text()
+
+
+def test_a_typed_folder_that_is_not_there_says_so(qapp, context, tmp_path):
+    """Silently creating a tree at a mistyped path is the worse failure."""
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    _select_format(tab, "library")
+
+    tab.destination_edit.setText(str(tmp_path / "tpyo"))
+    tab.destination_edit.editingFinished.emit()
+
+    assert "does not exist yet" in tab.destination_label.text()
+
+
+def test_clearing_the_typed_folder_disables_download(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    tab.destination_edit.setText(str(tmp_path))
+    tab.destination_edit.editingFinished.emit()
+    assert tab.download_button.isEnabled()
+
+    tab.destination_edit.setText("")
+    tab.destination_edit.editingFinished.emit()
+    assert tab.destination is None
+    assert not tab.download_button.isEnabled()
+
+
+def test_a_folder_dropped_on_the_download_tab_becomes_the_destination(
+    qapp, context, tmp_path
+):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    enter, drop = _drop(tab, tmp_path)
+
+    assert enter.isAccepted() and drop.isAccepted()
+    assert tab.destination == tmp_path
+    assert tab.destination_edit.text() == str(tmp_path)
+
+
+def test_a_folder_dropped_on_the_library_tab_opens_it(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    _drop(tab, tmp_path)
+
+    assert tab.root == tmp_path
+    assert tab.table.rowCount() == 2
+
+
+def test_a_library_folder_can_be_typed(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.path_edit.setText(str(tmp_path))
+    tab.path_edit.editingFinished.emit()
+
+    assert tab.root == tmp_path
+    assert tab.table.rowCount() == 2
+
+
+def test_the_pickers_are_the_only_route_to_a_file_dialog(qapp):
+    """A call site that reaches past pickers.py keeps the old hang."""
+    import pathlib
+
+    import tilearc_gui
+
+    gui = pathlib.Path(tilearc_gui.__file__).parent
+    offenders = [
+        path.name
+        for path in gui.glob("*.py")
+        if path.name != "pickers.py" and "QFileDialog" in path.read_text()
+    ]
+    assert offenders == []

@@ -16,7 +16,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
 from tilearc.library import CATALOGUE_NAME, Catalogue, human_saving
 
 from .formatting import human_bytes
+from .pickers import choose_directory, dropped_directory
 
 COLUMNS = ("Park", "Version", "Tiles", "Stored here", "Reused", "On disk", "Done")
 
@@ -40,6 +40,7 @@ class LibraryTab(QWidget):
         super().__init__()
         self.root: Path | None = None
         self._build()
+        self.setAcceptDrops(True)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -54,9 +55,15 @@ class LibraryTab(QWidget):
         )
 
         picker = QHBoxLayout()
-        self.path_label = QLabel("No library chosen")
-        self.path_label.setStyleSheet("color: gray;")
-        picker.addWidget(self.path_label, 1)
+        # Typed as well as browsed, and droppable: the system's folder panel is
+        # a separate process, and a wedged one must not take the tab with it.
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText(
+            "type or paste a library folder, or drop one onto this window"
+        )
+        self.path_edit.returnPressed.connect(self._typed)
+        self.path_edit.editingFinished.connect(self._typed)
+        picker.addWidget(self.path_edit, 1)
         self.browse = QPushButton("Choose library folder…")
         self.browse.clicked.connect(self._choose)
         picker.addWidget(self.browse)
@@ -121,15 +128,32 @@ class LibraryTab(QWidget):
 
     @Slot()
     def _choose(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Library folder")
+        chosen = choose_directory(self, "Library folder", self.root)
         if chosen:
-            self.set_root(Path(chosen))
+            self.set_root(chosen)
+
+    @Slot()
+    def _typed(self) -> None:
+        text = self.path_edit.text().strip()
+        if text and Path(text).expanduser() != self.root:
+            self.set_root(Path(text).expanduser())
 
     def set_root(self, root: Path) -> None:
         self.root = Path(root)
-        self.path_label.setText(str(self.root))
+        self.path_edit.setText(str(self.root))
         self.refresh_button.setEnabled(True)
         self.refresh()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        if dropped_directory(event.mimeData()) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        folder = dropped_directory(event.mimeData())
+        if folder is None:
+            return
+        self.set_root(folder)
+        event.acceptProposedAction()
 
     @Slot()
     def refresh(self) -> None:

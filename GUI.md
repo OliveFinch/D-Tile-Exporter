@@ -77,6 +77,40 @@ tilearc-gui
 
 If that works and the bundle doesn't, the problem is PyInstaller, not the app.
 
+### If a "Choose folder…" button beach-balls
+
+macOS draws its file and folder panels in a **separate process**, and the app
+sits and waits for one. When that service is wedged — a stale network mount in
+the sidebar or an unreachable iCloud item is enough — the panel never opens and
+the app beach-balls until the request gives up. Nothing in the app is stuck, and
+nothing in the app can unstick it.
+
+Two ways past it.
+
+**Don't use the panel.** Every folder in the app can be typed, pasted or
+dragged: drop a folder anywhere on the Download, Library or Verify tab and it's
+taken as the destination. That works whatever the system panel is doing.
+
+**Or use Qt's own picker**, which is drawn inside the app and never contacts the
+service:
+
+```bash
+TILEARC_QT_DIALOGS=1 open "dist/Park Tile Archiver.app"
+```
+
+To make that the default, set it for your login shell:
+
+```bash
+launchctl setenv TILEARC_QT_DIALOGS 1
+```
+
+It's plainer than the macOS panel — no sidebar, no favourites — but it opens
+immediately.
+
+If the panel hangs for this app it will hang for others. Restarting the Finder
+(⌥-right-click the Finder icon → Relaunch) or ejecting a disconnected network
+volume usually clears it.
+
 ### Gatekeeper on first launch
 
 The app isn't code-signed, so macOS may refuse a plain double-click the first
@@ -111,8 +145,10 @@ from those files.
    gets a warning.
 3. **Coverage** — leave **Only fetch tiles measured to exist** ticked. See
    below.
-4. **Save to** — choose a format and a folder. The exact path that will be
-   written is shown underneath.
+4. **Save to** — choose a format and a folder. The folder can be browsed for,
+   typed, pasted, or dragged onto the window. The exact path that will be
+   written is shown underneath; if the folder doesn't exist yet it says so,
+   rather than quietly creating a tree at a mistyped path.
 5. **Download**.
 
 **Coverage.** The zoom bounds in the park configs are rectangles; the drawn map
@@ -214,7 +250,7 @@ when that isn't the one you asked about. (The *mode* box is for Tokyo only,
 whose map exists twice — `daytime` and `nighttime`.)
 
 The tab points itself at the library a download just wrote to; **Choose library
-folder…** opens any other.
+folder…** opens any other, as does typing a path or dropping a folder on it.
 
 **Parks with no version history.** DLP has no selectable servers — it is always
 "current". Filing every download of it under `current` would have each one

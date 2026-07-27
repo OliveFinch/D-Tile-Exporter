@@ -7,7 +7,6 @@ from pathlib import Path
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -19,6 +18,7 @@ from PySide6.QtWidgets import (
 from tilearc.verify import verify as verify_archive
 
 from .formatting import human_bytes
+from .pickers import choose_directory, choose_file, dropped_directory
 from .workers import run_async
 
 
@@ -27,6 +27,7 @@ class VerifyTab(QWidget):
         super().__init__()
         self.path: Path | None = None
         self._build()
+        self.setAcceptDrops(True)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -75,17 +76,31 @@ class VerifyTab(QWidget):
 
     @Slot()
     def _choose_file(self) -> None:
-        chosen, _filter = QFileDialog.getOpenFileName(
-            self, "Choose an archive", "", "Archives (*.zip *.mbtiles);;All files (*)"
+        chosen = choose_file(
+            self, "Choose an archive", "Archives (*.zip *.mbtiles);;All files (*)"
         )
         if chosen:
-            self._set_path(Path(chosen))
+            self._set_path(chosen)
 
     @Slot()
     def _choose_folder(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choose an archive folder")
+        chosen = choose_directory(self, "Choose an archive folder")
         if chosen:
-            self._set_path(Path(chosen))
+            self._set_path(chosen)
+
+    # An archive dropped on the window, for when the folder panel will not open.
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        if dropped_directory(event.mimeData()) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        for url in event.mimeData().urls():
+            local = url.toLocalFile()
+            if local:
+                self._set_path(Path(local))
+                event.acceptProposedAction()
+                return
 
     def _set_path(self, path: Path) -> None:
         self.path = path
