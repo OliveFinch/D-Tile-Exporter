@@ -83,6 +83,9 @@ class DownloadTab(QWidget):
         self.plan = None
         self.destination: Path | None = None
         self.coverage_path: Path | None = None
+        #: Set when the coverage describes a different version from the one
+        #: about to be downloaded, which changes what the whole job means.
+        self.measured_against: dict | None = None
 
         self._thread: QThread | None = None
         self._worker: DownloadWorker | None = None
@@ -434,6 +437,10 @@ class DownloadTab(QWidget):
             return
 
         coverage, coverage_version = self._coverage_for(self.park.park_id)
+        measured = (coverage_version or {}).get("version") if coverage else None
+        self.measured_against = (
+            coverage_version if measured and str(measured) != str(version.code) else None
+        )
         self.plan = build_plan(
             self.park,
             version,
@@ -560,7 +567,11 @@ class DownloadTab(QWidget):
                 "consider lowering the maximum zoom.</span>"
             )
         for note in plan.notes:
-            lines.append(f"<span style='color:gray;'>{note}</span>")
+            # The version-mismatch note is not a detail: it says the footprint
+            # being used describes a different map. Grey was how it got past
+            # someone starting a 575,490-tile job.
+            colour = "#b36b00" if note.startswith("the coverage was measured") else "gray"
+            lines.append(f"<span style='color:{colour};'>{note}</span>")
 
         origin = rehosted_origin(plan)
         if origin is not None:
@@ -804,6 +815,8 @@ class DownloadTab(QWidget):
 
         if not self._confirm_rehosted():
             return
+        if not self._confirm_coverage_version():
+            return
 
         try:
             sources = self._build_sources()
@@ -881,6 +894,35 @@ class DownloadTab(QWidget):
             f"A version with its own URL is usually a re-host of tiles someone "
             f"already downloaded, so archiving it copies a copy rather than the "
             f"map.\n\nDownload it anyway?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return answer == QMessageBox.Yes
+
+    def _confirm_coverage_version(self) -> bool:
+        """Ask before archiving one version using another version's footprint.
+
+        A park's map is redrawn between versions, so a footprint measured on the
+        current one describes the current one. Pointed at an older version it
+        asks for tiles that version never had -- which arrive as "no imagery",
+        in numbers that look exactly like something being broken.
+        """
+        if self.measured_against is None or self.plan is None:
+            return True
+        code = self.measured_against.get("version")
+        label = self.measured_against.get("label") or code
+        answer = QMessageBox.warning(
+            self,
+            "The coverage describes a different version",
+            f"The measured footprint is of version {code} ({label}). You are "
+            f"downloading {self.plan.version.code}.\n\n"
+            f"A park's map is redrawn between versions, so this job will ask for "
+            f"tiles {self.plan.version.code} never had — they come back as "
+            f"\"no imagery\" — and will not ask for ground that version covered "
+            f"and the newer map dropped.\n\n"
+            f"To archive it exactly, trace {self.plan.version.code} first. To "
+            f"archive what the two maps have in common, carry on.\n\n"
+            f"Download anyway?",
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Cancel,
         )

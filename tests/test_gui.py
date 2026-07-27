@@ -1267,3 +1267,97 @@ def test_pointing_at_another_file_replans_without_the_tick_changing(qapp, contex
     tab._set_coverage(other, enable=True)
     assert tab.use_coverage.isChecked()
     assert tab.plan.total_tiles == 4
+
+
+# ---------------------------------------------------------------------------
+# a footprint measured on one version, used on another
+# ---------------------------------------------------------------------------
+
+
+def _coverage_measured_against(tmp_path, version, label="Jul '26 (Late)"):
+    import json
+
+    path = tmp_path / "measured-coverage.json"
+    path.write_text(json.dumps({"maps": {"wdw": {
+        "measuredAgainst": {"version": version, "label": label},
+        "zooms": {"11": {
+            "box": {"minX": 555, "maxX": 564, "minY": 851, "maxY": 859},
+            "tiles": 90}}}}}))
+    return path
+
+
+def test_a_footprint_from_another_version_is_flagged_in_amber(qapp, context, tmp_path):
+    """Grey is how a 575,490-tile job started against the wrong footprint."""
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(_coverage_measured_against(tmp_path, "900014458"), enable=True)
+    select(tab.version_combo, "47")
+    drain(qapp)
+
+    assert tab.measured_against == {
+        "version": "900014458", "label": "Jul '26 (Late)"
+    }
+    text = tab.estimate_label.text()
+    assert "measured against version 900014458" in text
+    mismatch = [line for line in text.split("<br>") if "measured against" in line]
+    assert mismatch and "#b36b00" in mismatch[0], "must not be grey"
+
+
+def test_the_same_version_is_not_flagged(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(_coverage_measured_against(tmp_path, "47"), enable=True)
+    select(tab.version_combo, "47")
+    drain(qapp)
+
+    assert tab.measured_against is None
+    assert tab._confirm_coverage_version() is True
+
+
+def test_starting_against_another_versions_footprint_asks_first(
+    qapp, context, tmp_path, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(_coverage_measured_against(tmp_path, "900014458"), enable=True)
+    select(tab.version_combo, "47")
+    drain(qapp)
+    tab.destination = tmp_path
+
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *args, **kwargs: (asked.append(args[2]), QMessageBox.Cancel)[1],
+    )
+    tab._start()
+    drain(qapp)
+
+    assert asked, "the mismatch must stop the job, not colour a label"
+    assert "900014458" in asked[0] and "no imagery" in asked[0]
+    assert tab._thread is None
+
+
+def test_switching_coverage_off_clears_the_mismatch(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(_coverage_measured_against(tmp_path, "900014458"), enable=True)
+    select(tab.version_combo, "47")
+    drain(qapp)
+    assert tab.measured_against is not None
+
+    tab.use_coverage.setChecked(False)
+    assert tab.measured_against is None, "no coverage in use, nothing to mismatch"
