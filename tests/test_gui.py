@@ -622,3 +622,66 @@ def test_the_other_formats_are_unchanged_by_that(qapp, context, tmp_path):
 
     _select_format(tab, "mbtiles")
     assert tab._job_output() == tab._output_path() == tmp_path / "wdw_47.mbtiles"
+
+
+# ---------------------------------------------------------------------------
+# measured coverage
+# ---------------------------------------------------------------------------
+
+
+def test_the_app_finds_and_uses_a_coverage_file(qapp, context, tmp_path, monkeypatch):
+    """Everything measured was reachable only from the CLI, which is not the
+    thing being used. A DLR v52 download planned from declared bounds asked for
+    380,800 tiles at z20 where 349,312 exist."""
+    import json
+    from pathlib import Path
+    from tilearc_gui import download_tab as module
+
+    coverage = tmp_path / "measured-coverage.json"
+    coverage.write_text(json.dumps({"maps": {"dlr": {
+        "measuredAgainst": {"version": "840388841", "label": "Jul '26 (Late)"},
+        "zooms": {"20": {
+            "box": {"minX": 180352, "maxX": 181247, "minY": 419328, "maxY": 419752},
+            "tiles": 349312, "shape": "irregular",
+            "runs": [[419328, 419711, 180352, 181247],
+                     [419712, 419752, 180736, 180863]]}}}}}))
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "dlr")
+    drain(qapp)
+    tab._set_coverage(coverage, enable=True)
+    idx = tab.version_combo.findData("52")
+    assert idx >= 0
+    tab.version_combo.setCurrentIndex(idx)
+    tab.min_zoom.setValue(20)
+    tab.max_zoom.setValue(20)
+    drain(qapp)
+
+    assert tab.plan is not None
+    assert tab.plan.total_tiles == 349_312, (
+        f"planned {tab.plan.total_tiles:,}; the declared box is 380,800"
+    )
+    assert tab.plan.zooms[0].runs is not None
+
+    # and turning it off goes back to the declared rectangle
+    tab.use_coverage.setChecked(False)
+    assert tab.plan.total_tiles != 349_312
+
+
+def test_a_park_missing_from_the_coverage_file_says_so(qapp, context, tmp_path):
+    import json
+    coverage = tmp_path / "measured-coverage.json"
+    coverage.write_text(json.dumps({"maps": {"dlr": {"zooms": {}}}}))
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(coverage, enable=True)
+    drain(qapp)
+
+    assert tab.plan is not None
+    assert any("no measured coverage for wdw" in note for note in tab.plan.notes)

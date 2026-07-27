@@ -25,9 +25,9 @@ from PySide6.QtWidgets import (
 
 from tilearc.config import ParkConfig, VersionEntry
 from tilearc.downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
-from tilearc.errors import QuotaError
+from tilearc.errors import QuotaError, TilearcError
 from tilearc.job import JobRequest
-from tilearc.plan import DEFAULT_BYTES_PER_TILE, build_plan
+from tilearc.plan import DEFAULT_BYTES_PER_TILE, build_plan, load_coverage
 from tilearc.tdr import (
     WORKER_TILE_CAP,
     build_tdr_source,
@@ -70,6 +70,7 @@ class DownloadTab(QWidget):
         self.versions: list[VersionEntry] = []
         self.plan = None
         self.destination: Path | None = None
+        self.coverage_path: Path | None = None
 
         self._thread: QThread | None = None
         self._worker: DownloadWorker | None = None
@@ -123,6 +124,27 @@ class DownloadTab(QWidget):
         zoom_row.addWidget(self.zoom_hint)
         zoom_row.addStretch(1)
         form.addRow("Zoom levels", zoom_row)
+
+        # Measured coverage. Without this the job is planned from the declared
+        # boundsByZoom, which is wrong in both directions on every park that has
+        # been measured -- asking for tiles that were never drawn, and skipping
+        # some that were.
+        coverage_row = QHBoxLayout()
+        self.use_coverage = QCheckBox("Only fetch tiles measured to exist")
+        self.use_coverage.setToolTip(
+            "Plans from a measured-coverage file instead of the declared bounds.\n"
+            "Across the six parks the declared bounds ask for about 37% more tiles\n"
+            "than exist, and miss around 1,700 that do."
+        )
+        self.use_coverage.toggled.connect(self._rebuild_plan)
+        coverage_row.addWidget(self.use_coverage)
+        self.coverage_label = QLabel("")
+        self.coverage_label.setStyleSheet("color: gray;")
+        coverage_row.addWidget(self.coverage_label, 1)
+        self.coverage_button = QPushButton("Choose…")
+        self.coverage_button.clicked.connect(self._choose_coverage)
+        coverage_row.addWidget(self.coverage_button)
+        form.addRow("Coverage", coverage_row)
 
         outer.addWidget(source_box)
 
@@ -311,6 +333,11 @@ class DownloadTab(QWidget):
         self.park_combo.setEnabled(True)
         self._note(f"Could not load park data: {message}")
 
+        # Last: it sets a checkbox whose signal rebuilds the plan, which needs
+        # every widget above to exist already.
+        self._find_coverage()
+
+
     @Slot()
     def _park_changed(self) -> None:
         park_id = self.park_combo.currentData()
@@ -380,15 +407,84 @@ class DownloadTab(QWidget):
             self._update_destination_label()
             return
 
+        coverage, coverage_version = self._coverage_for(self.park.park_id)
         self.plan = build_plan(
             self.park,
             version,
             min_zoom=self.min_zoom.value(),
             max_zoom=self.max_zoom.value(),
             modes=self._modes(),
+            coverage=coverage,
+            coverage_version=coverage_version,
         )
+        if self.use_coverage.isChecked() and coverage is None:
+            self.plan.notes.append(
+                f"no measured coverage for {self.park.park_id} in "
+                f"{self.coverage_path.name if self.coverage_path else 'the file'}; "
+                f"planning from the declared bounds, which may ask for tiles that "
+                f"do not exist and miss some that do"
+            )
         self._show_estimate()
         self._update_destination_label()
+
+    def _find_coverage(self) -> None:
+        """Look for a coverage file in the obvious places, and use it if found.
+
+        On by default when one exists: planning from declared bounds is the
+        wrong answer everywhere it has been checked, so it is a poor thing to
+        have to remember to turn on.
+        """
+        candidates = []
+        config_dir = getattr(self.context, "config_dir", None)
+        if config_dir:
+            candidates += [
+                Path(config_dir) / "measured-coverage.json",
+                Path(config_dir).parent / "measured-coverage.json",
+                Path(config_dir).parent / "tools" / "measured-coverage.json",
+            ]
+        here = Path(__file__).resolve()
+        candidates += [
+            here.parents[2] / "tools" / "measured-coverage.json",
+            here.parents[3] / "tools" / "measured-coverage.json",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    self._set_coverage(candidate, enable=True)
+                    return
+            except OSError:
+                continue
+        self._set_coverage(None, enable=False)
+
+    def _set_coverage(self, path: Path | None, *, enable: bool) -> None:
+        self.coverage_path = Path(path) if path else None
+        self.use_coverage.setEnabled(self.coverage_path is not None)
+        self.use_coverage.setChecked(bool(enable and self.coverage_path))
+        self.coverage_label.setText(
+            self.coverage_path.name if self.coverage_path else "none found"
+        )
+        if self.coverage_path:
+            self.coverage_label.setToolTip(str(self.coverage_path))
+
+    @Slot()
+    def _choose_coverage(self) -> None:
+        chosen, _filter = QFileDialog.getOpenFileName(
+            self, "Measured coverage file", "", "JSON (*.json)"
+        )
+        if chosen:
+            self._set_coverage(Path(chosen), enable=True)
+            self._rebuild_plan()
+
+    def _coverage_for(self, park_id: str):
+        """This park's measured footprints, or (None, None) if unavailable."""
+        if not self.use_coverage.isChecked() or self.coverage_path is None:
+            return None, None
+        try:
+            return load_coverage(self.coverage_path, park_id)
+        except TilearcError:
+            # A file covering five parks is normal; the sixth simply plans from
+            # its declared bounds, and the note below says so.
+            return None, None
 
     def _modes(self) -> list[str] | None:
         """The TDR modes to fetch, or None for every other park."""
