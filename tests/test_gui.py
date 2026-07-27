@@ -241,8 +241,11 @@ def test_dlp_jan2026_shows_the_r2_url_not_the_disney_cdn(qapp, context):
     select(tab.version_combo, "jan2026")
     text = tab.estimate_label.text()
     assert "pub-" in text
-    assert "media.disneylandparis.com" not in text
     assert "own tile server" in text or "overrides" in text
+    # The example URL is the one that says where tiles would come from. The
+    # re-host warning names the Disney host too, so look at that line alone.
+    example = [line for line in text.split("<br>") if "monospace" in line]
+    assert example and "media.disneylandparis.com" not in example[0]
 
     select(tab.version_combo, "current")
     assert "media.disneylandparis.com" in tab.estimate_label.text()
@@ -574,7 +577,7 @@ def test_measure_asks_before_spending_requests(qapp, context, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _plan(*, park_id: str, version: str):
+def _plan(*, park_id: str, version: str, supports_history: bool = True):
     from tilearc.config import ParkConfig, TileBounds, VersionEntry
     from tilearc.plan import JobPlan, ZoomPlan
 
@@ -582,6 +585,7 @@ def _plan(*, park_id: str, version: str):
         park_id=park_id, label=park_id.upper(), tile_template="t",
         min_zoom=11, max_zoom=11, y_scheme="xyz",
         bounds_by_zoom={11: TileBounds(0, 1, 0, 1)},
+        supports_history=supports_history,
     )
     return JobPlan(park=park, version=VersionEntry(code=version),
                    zooms=[ZoomPlan(11, TileBounds(0, 1, 0, 1))], modes=[])
@@ -622,3 +626,368 @@ def test_the_other_formats_are_unchanged_by_that(qapp, context, tmp_path):
 
     _select_format(tab, "mbtiles")
     assert tab._job_output() == tab._output_path() == tmp_path / "wdw_47.mbtiles"
+
+
+# ---------------------------------------------------------------------------
+# measured coverage
+# ---------------------------------------------------------------------------
+
+
+def test_the_app_finds_and_uses_a_coverage_file(qapp, context, tmp_path, monkeypatch):
+    """Everything measured was reachable only from the CLI, which is not the
+    thing being used. A DLR v52 download planned from declared bounds asked for
+    380,800 tiles at z20 where 349,312 exist."""
+    import json
+    from pathlib import Path
+    from tilearc_gui import download_tab as module
+
+    coverage = tmp_path / "measured-coverage.json"
+    coverage.write_text(json.dumps({"maps": {"dlr": {
+        "measuredAgainst": {"version": "840388841", "label": "Jul '26 (Late)"},
+        "zooms": {"20": {
+            "box": {"minX": 180352, "maxX": 181247, "minY": 419328, "maxY": 419752},
+            "tiles": 349312, "shape": "irregular",
+            "runs": [[419328, 419711, 180352, 181247],
+                     [419712, 419752, 180736, 180863]]}}}}}))
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "dlr")
+    drain(qapp)
+    tab._set_coverage(coverage, enable=True)
+    idx = tab.version_combo.findData("52")
+    assert idx >= 0
+    tab.version_combo.setCurrentIndex(idx)
+    tab.min_zoom.setValue(20)
+    tab.max_zoom.setValue(20)
+    drain(qapp)
+
+    assert tab.plan is not None
+    assert tab.plan.total_tiles == 349_312, (
+        f"planned {tab.plan.total_tiles:,}; the declared box is 380,800"
+    )
+    assert tab.plan.zooms[0].runs is not None
+
+    # and turning it off goes back to the declared rectangle
+    tab.use_coverage.setChecked(False)
+    assert tab.plan.total_tiles != 349_312
+
+
+def test_a_park_missing_from_the_coverage_file_says_so(qapp, context, tmp_path):
+    import json
+    coverage = tmp_path / "measured-coverage.json"
+    coverage.write_text(json.dumps({"maps": {"dlr": {"zooms": {}}}}))
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab._set_coverage(coverage, enable=True)
+    drain(qapp)
+
+    assert tab.plan is not None
+    assert any("no measured coverage for wdw" in note for note in tab.plan.notes)
+
+
+# ---------------------------------------------------------------------------
+# a park with no version history is filed by date
+# ---------------------------------------------------------------------------
+
+
+def test_a_park_without_versions_is_filed_under_the_date(qapp, context, tmp_path):
+    """DLP has no selectable servers -- it is always 'current'.
+
+    Filing every download of it under 'current' would have each one overwrite
+    the last, which is the opposite of an archive. The path shown has to be the
+    one the writer will actually use, or the two disagree silently.
+    """
+    from datetime import datetime, timezone
+
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="dlp", version="current", supports_history=False)
+    tab.destination = tmp_path
+    _select_format(tab, "library")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert tab._job_output() == tmp_path
+    assert tab._output_path() == tmp_path / "dlp" / today
+
+
+# ---------------------------------------------------------------------------
+# re-hosted versions
+# ---------------------------------------------------------------------------
+
+
+def test_a_rehosted_version_is_flagged_in_the_estimate(qapp, context):
+    """jan2026 is a copy of DLP already downloaded and re-hosted.
+
+    The CLI refuses it outright. The app said nothing at all, so the one park
+    that must not be archived from its listed URL was the easiest to archive.
+    """
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "dlp")
+    drain(qapp)
+
+    select(tab.version_combo, "jan2026")
+    assert "not" in tab.estimate_label.text()
+    assert "copies a copy" in tab.estimate_label.text()
+
+    select(tab.version_combo, "current")
+    assert "copies a copy" not in tab.estimate_label.text()
+
+
+def test_starting_a_rehosted_version_asks_first(qapp, context, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "dlp")
+    drain(qapp)
+    select(tab.version_combo, "jan2026")
+    tab.destination = tmp_path
+
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *args, **kwargs: (asked.append(args[2]), QMessageBox.Cancel)[1],
+    )
+    tab._start()
+    drain(qapp)
+
+    assert asked, "a re-hosted version must not start silently"
+    assert "pub-" in asked[0] or "not the park's own" in asked[0]
+    assert tab._thread is None, "cancelling must not start the job"
+
+
+def test_a_normal_version_is_not_asked_about(qapp, context):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    assert tab._confirm_rehosted() is True
+
+
+# ---------------------------------------------------------------------------
+# resume state left behind by a different job
+# ---------------------------------------------------------------------------
+
+
+def _request_for(tab, tmp_path):
+    from tilearc.downloader import DownloadOptions
+    from tilearc.job import JobRequest
+    from tilearc.urls import TileSource
+
+    return JobRequest(
+        plan=tab.plan,
+        sources={"": TileSource("test", "https://example.test/{z}/{x}/{y}.jpg")},
+        fmt="library",
+        output=tmp_path,
+        options=DownloadOptions(),
+    )
+
+
+def test_state_from_another_job_offers_to_start_over(qapp, context, monkeypatch, tmp_path):
+    """The error told the user to pass --restart, which the app cannot do.
+
+    So the job simply failed, every time, with an instruction for a program
+    they do not run.
+    """
+    from PySide6.QtWidgets import QMessageBox
+    from tilearc.state import JobState
+
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    request = _request_for(tab, tmp_path)
+
+    state = JobState(request.resolved_state_path())
+    state.bind_job("a-different-job", {"park": "dlr"})
+    state.close()
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    assert tab._settle_state(request) is True
+    assert request.restart is True
+
+
+def test_declining_to_start_over_does_not_start(qapp, context, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    from tilearc.state import JobState
+
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    request = _request_for(tab, tmp_path)
+
+    state = JobState(request.resolved_state_path())
+    state.bind_job("a-different-job", {"park": "dlr"})
+    state.close()
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
+    assert tab._settle_state(request) is False
+    assert request.restart is False
+
+
+def test_resuming_the_same_job_asks_nothing(qapp, context, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    from tilearc.state import JobState
+
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    request = _request_for(tab, tmp_path)
+
+    state = JobState(request.resolved_state_path())
+    state.bind_job(tab.plan.fingerprint(), {"park": "wdw"})
+    state.close()
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("resuming its own work must not ask anything")
+
+    monkeypatch.setattr(QMessageBox, "question", refuse)
+    assert tab._settle_state(request) is True
+    assert request.restart is False
+
+
+def test_a_fresh_job_asks_nothing(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    tab.plan = _plan(park_id="wdw", version="47")
+    request = _request_for(tab, tmp_path)
+    assert not request.resolved_state_path().is_file()
+    assert tab._settle_state(request) is True
+
+
+# ---------------------------------------------------------------------------
+# the Library tab
+# ---------------------------------------------------------------------------
+
+
+def _library(root):
+    """Two versions of one park, the second changing one tile of two."""
+    from tilearc.config import ParkConfig, TileBounds, VersionEntry
+    from tilearc.library import LibraryWriter
+    from tilearc.plan import JobPlan, ZoomPlan
+
+    park = ParkConfig(
+        park_id="wdw", label="WDW", tile_template="https://cdn/{z}/{x}/{y}.jpg",
+        min_zoom=11, max_zoom=11, y_scheme="xyz",
+        bounds_by_zoom={11: TileBounds(0, 1, 0, 1)},
+    )
+
+    def archive(version, tiles, complete=True):
+        plan = JobPlan(park=park, version=VersionEntry(code=version),
+                       zooms=[ZoomPlan(11, TileBounds(0, 1, 0, 1))], modes=[])
+        writer = LibraryWriter(root, plan)
+        writer.open()
+        for (z, x, y), data in tiles.items():
+            writer.write_tile(z, x, y, "", data)
+        writer.finalize({"park": {"id": "wdw"}}, complete=complete)
+        writer.catalogue.close()
+
+    archive("47", {(11, 0, 0): b"aaaa", (11, 0, 1): b"bbbb"})
+    archive("105", {(11, 0, 0): b"aaaa", (11, 0, 1): b"CHANGED"}, complete=False)
+
+
+def test_library_tab_lists_what_the_archive_holds(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+
+    assert tab.table.rowCount() == 2
+    rows = {
+        tab.table.item(r, 1).text(): [
+            tab.table.item(r, c).text() for c in range(tab.table.columnCount())
+        ]
+        for r in range(tab.table.rowCount())
+    }
+    assert rows["47"][0] == "wdw"
+    assert rows["47"][2] == "2" and rows["47"][3] == "2"   # both stored here
+    assert rows["105"][2] == "2" and rows["105"][3] == "1"  # one reused
+    assert rows["105"][4] == "1"
+    assert rows["47"][6] == "yes"
+    assert rows["105"][6] == "unfinished"
+    assert "saves" in tab.summary.text()
+
+
+def test_library_tab_finds_the_version_that_actually_stores_a_tile(qapp, tmp_path):
+    """The question no amount of looking at the folders can answer.
+
+    wdw/105/11/0/0.jpg does not exist -- it did not change -- but version 105
+    does have that tile, and it is in 47.
+    """
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    assert not (tmp_path / "wdw" / "105" / "11" / "0" / "0.jpg").exists()
+
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    tab.q_park.setText("wdw")
+    tab.q_version.setText("105")
+    tab.q_z.setText("11")
+    tab.q_x.setText("0")
+    tab.q_y.setText("0")
+    tab._resolve()
+
+    assert "wdw/47/11/0/0.jpg" in tab.found.text().replace("\\", "/")
+    assert "stored under version 47" in tab.found.text()
+
+
+def test_library_tab_says_when_a_tile_is_simply_not_there(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    for box, value in ((tab.q_park, "wdw"), (tab.q_version, "105"),
+                       (tab.q_z, "11"), (tab.q_x, "9"), (tab.q_y, "9")):
+        box.setText(value)
+    tab._resolve()
+    assert "not in this library" in tab.found.text()
+
+
+def test_library_tab_does_not_create_a_catalogue_in_a_stray_folder(qapp, tmp_path):
+    """Opening a Catalogue makes one, so a wrong folder would gain a database."""
+    from tilearc.library import CATALOGUE_NAME
+    from tilearc_gui.library_tab import LibraryTab
+
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    assert "No catalogue here" in tab.summary.text()
+    assert tab.table.rowCount() == 0
+
+    for box, value in ((tab.q_park, "wdw"), (tab.q_version, "47"),
+                       (tab.q_z, "11"), (tab.q_x, "0"), (tab.q_y, "0")):
+        box.setText(value)
+    tab._resolve()
+
+    assert "No catalogue" in tab.found.text()
+    assert not (tmp_path / CATALOGUE_NAME).exists()
+
+
+def test_library_tab_rejects_coordinates_that_are_not_numbers(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    for box, value in ((tab.q_park, "wdw"), (tab.q_version, "47"),
+                       (tab.q_z, "eleven"), (tab.q_x, "0"), (tab.q_y, "0")):
+        box.setText(value)
+    tab._resolve()
+    assert "whole numbers" in tab.found.text()
+
+
+def test_the_window_has_a_library_tab_wired_to_the_download(qapp, context, monkeypatch):
+    from tilearc_gui.main_window import MainWindow
+
+    window = MainWindow()
+    drain(qapp)
+    titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert "Library" in titles
+
+    seen = []
+    monkeypatch.setattr(window.library_tab, "set_root", lambda root: seen.append(root))
+    window.download_tab.library_written.emit("/somewhere")
+    assert seen == ["/somewhere"]
