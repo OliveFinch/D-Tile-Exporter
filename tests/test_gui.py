@@ -205,12 +205,41 @@ def test_estimate_matches_the_published_scale_reference(qapp, context):
 
     # The tab defaults to the park minimum through z17.
     assert (tab.min_zoom.value(), tab.max_zoom.value()) == (11, 17)
+
+    # The published reference counts the declared rectangles.
+    tab.use_coverage.setChecked(False)
     assert tab.plan.total_tiles == 37_850
     assert "37,850 tiles" in tab.estimate_label.text()
 
     tab.max_zoom.setValue(20)
     assert tab.plan.total_tiles == 575_450
     assert "very large job" in tab.estimate_label.text()
+
+
+def test_measured_coverage_is_on_without_being_asked_for(qapp, context):
+    """It has to be on by default or it is not on at all.
+
+    The find ran only when loading park data *failed*, so on every working
+    launch the box was unticked and every job planned from the declared
+    rectangles -- which is the bug this whole feature exists to fix.
+    """
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+
+    assert tab.coverage_path is not None, "no coverage file found at all"
+    assert tab.coverage_path.name == "measured-coverage.json"
+    assert tab.use_coverage.isChecked()
+
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    select(tab.version_combo, "801755166")
+
+    # 40 more than the declared bounds: z12's imagery starts four columns west
+    # of where the config says it does, and those were never being asked for.
+    assert tab.plan.total_tiles == 37_890
+    tab.use_coverage.setChecked(False)
+    assert tab.plan.total_tiles == 37_850
 
 
 def test_zoom_spinboxes_are_clamped_to_the_park_range(qapp, context):
@@ -223,6 +252,11 @@ def test_zoom_spinboxes_are_clamped_to_the_park_range(qapp, context):
     assert (tab.min_zoom.minimum(), tab.min_zoom.maximum()) == (14, 20)
     tab.max_zoom.setValue(99)          # a spin box clamps rather than accepting
     assert tab.max_zoom.value() == 20
+
+    # Hong Kong is L-shaped; the declared rectangle is 21,852 and more than half
+    # of it was never drawn.
+    assert tab.plan.total_tiles == 9_332
+    tab.use_coverage.setChecked(False)
     assert tab.plan.total_tiles == 21_852
 
 
@@ -688,7 +722,9 @@ def test_a_park_missing_from_the_coverage_file_says_so(qapp, context, tmp_path):
     drain(qapp)
 
     assert tab.plan is not None
-    assert any("no measured coverage for wdw" in note for note in tab.plan.notes)
+    assert any(
+        "has no measurements for wdw" in note for note in tab.plan.notes
+    ), tab.plan.notes
 
 
 # ---------------------------------------------------------------------------
@@ -1141,3 +1177,93 @@ def test_the_pickers_are_the_only_route_to_a_file_dialog(qapp):
         if path.name != "pickers.py" and "QFileDialog" in path.read_text()
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# the coverage file has to survive being packaged
+# ---------------------------------------------------------------------------
+
+
+def test_the_bundle_carries_the_coverage_file():
+    """A packaged app has no repo above it to find the file in.
+
+    Without it in `datas` the built app plans every download from the declared
+    bounds -- the exact failure the measurements were taken to prevent, and
+    invisible unless you count the tiles.
+    """
+    from pathlib import Path
+
+    spec = Path(__file__).resolve().parent.parent / "packaging" / "ParkTileArchiver.spec"
+    text = spec.read_text()
+    assert "measured-coverage.json" in text
+    assert '(COVERAGE, "tools")' in text, "must land at tools/ inside the bundle"
+
+
+def test_the_app_looks_inside_the_bundle_for_it(qapp, context, monkeypatch, tmp_path):
+    """PyInstaller unpacks to sys._MEIPASS, which is where the spec puts it."""
+    import json
+
+    bundled = tmp_path / "tools"
+    bundled.mkdir()
+    (bundled / "measured-coverage.json").write_text(json.dumps({"maps": {}}))
+    monkeypatch.setattr("sys._MEIPASS", str(tmp_path), raising=False)
+
+    tab = DownloadTab(context)
+    assert tab.coverage_path == bundled / "measured-coverage.json"
+
+
+def test_no_coverage_file_is_said_out_loud(qapp, context, monkeypatch):
+    """Falling back to declared bounds silently is how the DLR run lost 31,684."""
+    from tilearc_gui import download_tab as module
+
+    monkeypatch.setattr(module.Path, "is_file", lambda self: False)
+    tab = DownloadTab(context)
+    monkeypatch.undo()
+
+    assert tab.coverage_path is None
+    assert not tab.use_coverage.isEnabled()
+    assert "none found" in tab.coverage_label.text()
+
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    assert any(
+        "no measured-coverage file was found" in note for note in tab.plan.notes
+    ), tab.plan.notes
+
+
+def test_switching_coverage_off_says_so_too(qapp, context):
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    # "extends past its declared bounds" is a coverage note, not a fallback.
+    assert not any("planning from the declared" in n for n in tab.plan.notes)
+
+    tab.use_coverage.setChecked(False)
+    assert any("switched off" in note for note in tab.plan.notes), tab.plan.notes
+
+
+def test_pointing_at_another_file_replans_without_the_tick_changing(qapp, context, tmp_path):
+    """Same tick, different file: nothing is emitted, so nothing rebuilt."""
+    import json
+
+    other = tmp_path / "measured-coverage.json"
+    other.write_text(json.dumps({"maps": {"wdw": {"zooms": {
+        "11": {"box": {"minX": 0, "maxX": 1, "minY": 0, "maxY": 1}, "tiles": 4}}}}}))
+
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    tab.min_zoom.setValue(11)
+    tab.max_zoom.setValue(11)
+    assert tab.use_coverage.isChecked()
+    assert tab.plan.total_tiles == 90
+
+    tab._set_coverage(other, enable=True)
+    assert tab.use_coverage.isChecked()
+    assert tab.plan.total_tiles == 4
