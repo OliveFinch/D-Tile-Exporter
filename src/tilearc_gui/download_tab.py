@@ -8,7 +8,6 @@ from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -45,6 +44,7 @@ from tilearc.urls import build_source
 
 from .context import AppContext
 from .formatting import human_bytes, human_duration
+from .pickers import choose_directory, choose_file, dropped_directory
 from .workers import DownloadWorker, run_async
 
 FORMAT_CHOICES = [
@@ -91,6 +91,7 @@ class DownloadTab(QWidget):
         self._generation = 0
 
         self._build()
+        self.setAcceptDrops(True)
         self.context.changed.connect(self.reload_parks)
 
     # ------------------------------------------------------------------ UI
@@ -222,6 +223,19 @@ class DownloadTab(QWidget):
         self.browse_button.clicked.connect(self._choose_folder)
         picker_row.addWidget(self.browse_button)
         dest_layout.addLayout(picker_row)
+
+        # Typed as well as browsed. The system's folder panel is a separate
+        # process that can wedge; a folder you can paste or drop keeps the app
+        # usable when it does.
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Folder"))
+        self.destination_edit = QLineEdit()
+        self.destination_edit.setPlaceholderText(
+            "type or paste a folder, or drop one onto this window"
+        )
+        self.destination_edit.editingFinished.connect(self._destination_typed)
+        folder_row.addWidget(self.destination_edit, 1)
+        dest_layout.addLayout(folder_row)
 
         self.destination_label = QLabel("No folder chosen")
         self.destination_label.setStyleSheet("color: gray;")
@@ -479,11 +493,9 @@ class DownloadTab(QWidget):
 
     @Slot()
     def _choose_coverage(self) -> None:
-        chosen, _filter = QFileDialog.getOpenFileName(
-            self, "Measured coverage file", "", "JSON (*.json)"
-        )
+        chosen = choose_file(self, "Measured coverage file", "JSON (*.json)")
         if chosen:
-            self._set_coverage(Path(chosen), enable=True)
+            self._set_coverage(chosen, enable=True)
             self._rebuild_plan()
 
     def _coverage_for(self, park_id: str):
@@ -585,11 +597,12 @@ class DownloadTab(QWidget):
 
     @Slot()
     def _choose_credentials(self) -> None:
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, "Choose the TDR credentials file", "", "JSON files (*.json);;All files (*)"
+        chosen = choose_file(
+            self, "Choose the TDR credentials file",
+            "JSON files (*.json);;All files (*)",
         )
         if chosen:
-            self.tdr_credentials.setText(chosen)
+            self.tdr_credentials.setText(str(chosen))
             self._tdr_settings_changed()
 
     @Slot()
@@ -647,10 +660,34 @@ class DownloadTab(QWidget):
 
     @Slot()
     def _choose_folder(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choose where to save the tiles")
+        chosen = choose_directory(self, "Choose where to save the tiles", self.destination)
         if chosen:
-            self.destination = Path(chosen)
-            self._update_destination_label()
+            self._set_destination(chosen)
+
+    @Slot()
+    def _destination_typed(self) -> None:
+        text = self.destination_edit.text().strip()
+        self._set_destination(Path(text).expanduser() if text else None, echo=False)
+
+    def _set_destination(self, folder: Path | None, *, echo: bool = True) -> None:
+        self.destination = folder
+        if echo:
+            self.destination_edit.setText(str(folder) if folder else "")
+        self._update_destination_label()
+
+    # -- drag and drop ------------------------------------------------------
+    # The gesture someone reaches for when a folder picker will not open.
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        if dropped_directory(event.mimeData()) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        folder = dropped_directory(event.mimeData())
+        if folder is None:
+            return
+        self._set_destination(folder)
+        event.acceptProposedAction()
 
     def _job_output(self) -> Path | None:
         """What the writer is handed.
@@ -691,6 +728,12 @@ class DownloadTab(QWidget):
             self.destination_label.setText(
                 "No folder chosen" if self.destination is None else str(self.destination)
             )
+        elif self.destination is not None and not self.destination.is_dir():
+            # A typed path with a typo in it would otherwise quietly become a
+            # new tree somewhere nobody meant.
+            self.destination_label.setText(
+                f"{path}   —   {self.destination} does not exist yet; it will be created"
+            )
         else:
             self.destination_label.setText(str(path))
         self._refresh_buttons()
@@ -720,7 +763,7 @@ class DownloadTab(QWidget):
             self.min_zoom, self.max_zoom, self.format_combo, self.adaptive,
             self.retry_missing,
             self.tdr_mode, self.tdr_route, self.tdr_credentials, self.tdr_browse,
-            self.browse_button, self.concurrency, self.rps,
+            self.browse_button, self.destination_edit, self.concurrency, self.rps,
         ):
             widget.setEnabled(not running)
 
