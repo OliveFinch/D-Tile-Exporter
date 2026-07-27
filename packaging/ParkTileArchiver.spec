@@ -39,11 +39,23 @@ EXCLUDES = [
     "matplotlib", "numpy", "PIL", "tkinter", "pytest",
 ]
 
+# The measured footprint of every zoom of every park. The app plans downloads
+# from this rather than from the declared boundsByZoom, which asks for 37% more
+# tiles than exist and misses about 1,700 that do -- so a bundle without it
+# archives the wrong thing. There is no repo to find it in once packaged, so it
+# travels inside, at the same relative path the source tree uses.
+COVERAGE = os.path.join(PROJECT, "tools", "measured-coverage.json")
+if not os.path.isfile(COVERAGE):
+    raise SystemExit(
+        f"{COVERAGE} is missing. The app plans from it; building without it "
+        f"would produce archives with holes in them."
+    )
+
 analysis = Analysis(
     [ENTRY],
     pathex=[SOURCE],
     binaries=[],
-    datas=[],
+    datas=[(COVERAGE, "tools")],
     hiddenimports=[
         "tilearc",
         "tilearc_gui",

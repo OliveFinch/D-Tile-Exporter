@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
@@ -318,6 +319,11 @@ class DownloadTab(QWidget):
         button_row.addWidget(self.download_button)
         outer.addLayout(button_row)
 
+        # Last, and it has to be last: it ticks a checkbox whose signal rebuilds
+        # the plan, which reads widgets built above. Anywhere earlier and the
+        # tab dies on construction.
+        self._find_coverage()
+
     # -------------------------------------------------------------- loading
 
     @Slot()
@@ -357,11 +363,6 @@ class DownloadTab(QWidget):
             return
         self.park_combo.setEnabled(True)
         self._note(f"Could not load park data: {message}")
-
-        # Last: it sets a checkbox whose signal rebuilds the plan, which needs
-        # every widget above to exist already.
-        self._find_coverage()
-
 
     @Slot()
     def _park_changed(self) -> None:
@@ -442,12 +443,22 @@ class DownloadTab(QWidget):
             coverage=coverage,
             coverage_version=coverage_version,
         )
-        if self.use_coverage.isChecked() and coverage is None:
+        # Planning from declared bounds is never silent. It is the wrong answer
+        # on every park that has been measured, so if a job is about to do it,
+        # the estimate says why.
+        if coverage is None:
+            if not self.use_coverage.isChecked() and self.coverage_path is None:
+                reason = "no measured-coverage file was found"
+            elif not self.use_coverage.isChecked():
+                reason = f"measured coverage is switched off ({self.coverage_path.name})"
+            else:
+                reason = (
+                    f"{self.coverage_path.name if self.coverage_path else 'the file'} "
+                    f"has no measurements for {self.park.park_id}"
+                )
             self.plan.notes.append(
-                f"no measured coverage for {self.park.park_id} in "
-                f"{self.coverage_path.name if self.coverage_path else 'the file'}; "
-                f"planning from the declared bounds, which may ask for tiles that "
-                f"do not exist and miss some that do"
+                f"planning from the declared bounds — {reason}. Those ask for "
+                f"tiles that do not exist and miss some that do"
             )
         self._show_estimate()
         self._update_destination_label()
@@ -467,6 +478,11 @@ class DownloadTab(QWidget):
                 Path(config_dir).parent / "measured-coverage.json",
                 Path(config_dir).parent / "tools" / "measured-coverage.json",
             ]
+        # Inside a bundle there is no repo to look up from, so the file has to
+        # be carried along; the spec puts it here.
+        bundled = getattr(sys, "_MEIPASS", None)
+        if bundled:
+            candidates.append(Path(bundled) / "tools" / "measured-coverage.json")
         here = Path(__file__).resolve()
         candidates += [
             here.parents[2] / "tools" / "measured-coverage.json",
@@ -485,18 +501,29 @@ class DownloadTab(QWidget):
         self.coverage_path = Path(path) if path else None
         self.use_coverage.setEnabled(self.coverage_path is not None)
         self.use_coverage.setChecked(bool(enable and self.coverage_path))
-        self.coverage_label.setText(
-            self.coverage_path.name if self.coverage_path else "none found"
-        )
         if self.coverage_path:
+            self.coverage_label.setStyleSheet("color: gray;")
+            self.coverage_label.setText(self.coverage_path.name)
             self.coverage_label.setToolTip(str(self.coverage_path))
+        else:
+            # Not a detail. Without it the job plans from rectangles that are
+            # wrong on every park measured.
+            self.coverage_label.setStyleSheet("color: #b36b00;")
+            self.coverage_label.setText("none found — press Choose…")
+            self.coverage_label.setToolTip(
+                "measured-coverage.json was not where the app looked. Without "
+                "it, downloads are planned from the declared bounds."
+            )
+        # Not left to the checkbox's toggled signal: pointing at a different
+        # file without changing the tick emits nothing, and the plan would go
+        # on being built from the file that was replaced.
+        self._rebuild_plan()
 
     @Slot()
     def _choose_coverage(self) -> None:
         chosen = choose_file(self, "Measured coverage file", "JSON (*.json)")
         if chosen:
             self._set_coverage(chosen, enable=True)
-            self._rebuild_plan()
 
     def _coverage_for(self, park_id: str):
         """This park's measured footprints, or (None, None) if unavailable."""

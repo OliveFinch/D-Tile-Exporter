@@ -157,9 +157,14 @@ real servers, the declared bounds ask for about 37% more tiles than exist and
 miss around 1,700 that do. With the box ticked the job is planned from
 `tools/measured-coverage.json` — the measured footprint of every zoom of every
 park, including the L-shapes and the notches — instead of from the declared
-rectangle. The app finds that file on its own; **Choose…** points it at another.
-A park the file doesn't cover falls back to its declared bounds and says so in
-the estimate.
+rectangle. The file is built into the app, so a bundle carries its own copy;
+**Choose…** points at a different one — a hand-edited copy, or a fresh file
+after re-measuring a park.
+
+Whenever a job is planned from the declared bounds instead, the estimate says
+so and why: the box unticked, no file found, or a file with no measurements for
+that park. It is never a silent fallback, because the difference does not show
+up until you count the tiles afterwards.
 
 **Speed.** *Parallel requests* and *Max requests/second* default to 5 and 10,
 which is deliberately gentle — a full-depth park at 10 req/s takes many hours.
