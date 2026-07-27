@@ -161,6 +161,14 @@ rectangle. The file is built into the app, so a bundle carries its own copy;
 **Choose…** points at a different one — a hand-edited copy, or a fresh file
 after re-measuring a park.
 
+**A footprint belongs to the version it was measured on.** The file in the repo
+was measured against each park's current map. A park is redrawn between
+versions, so pointing that footprint at an older server asks for tiles that
+version never had — they come back as *no imagery* — and skips any ground the
+old map covered and the new one dropped. The app says so in amber and asks
+before starting. Archiving an old version exactly means tracing that version
+first; carrying on archives what the two maps have in common.
+
 Whenever a job is planned from the declared bounds instead, the estimate says
 so and why: the box unticked, no file found, or a file with no measurements for
 that park. It is never a silent fallback, because the difference does not show
