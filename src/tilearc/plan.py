@@ -121,6 +121,27 @@ class JobPlan:
         return [(zp.zoom, zp.bounds, zp.count) for zp in self.zooms]
 
 
+def rehosted_origin(plan: "JobPlan") -> tuple[str, str] | None:
+    """``(serving host, the park's own host)`` when a version overrides the URL.
+
+    A version carrying its own ``url`` is served from somewhere other than the
+    park's host. Sometimes that is the real source; DLP's ``jan2026`` is not --
+    it is a copy already downloaded and re-hosted, so archiving it captures a
+    snapshot of the archive rather than of the map.
+
+    Which of those a given override is cannot be decided from here, so this
+    only reports the mismatch and leaves the refusing to the caller.
+    """
+    override = plan.version.url
+    if not override:
+        return None
+    from urllib.parse import urlparse
+
+    park_host = urlparse(plan.park.tile_template or "").hostname or "(none)"
+    other_host = urlparse(override).hostname or override
+    return other_host, park_host
+
+
 def load_coverage(path: str | Path, park_id: str) -> tuple[dict[int, dict], dict | None]:
     """Read one park's measured footprints, and which version they came from.
 

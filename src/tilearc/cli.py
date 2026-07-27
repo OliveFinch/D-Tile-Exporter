@@ -25,7 +25,13 @@ from .doctor import check_park, worst_severity
 from .downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
 from .errors import ConfigError, QuotaError, TilearcError
 from .job import JobRequest, run_job
-from .plan import DEFAULT_BYTES_PER_TILE, JobPlan, build_plan, load_coverage
+from .plan import (
+    DEFAULT_BYTES_PER_TILE,
+    JobPlan,
+    build_plan,
+    load_coverage,
+    rehosted_origin,
+)
 from .progress import Progress
 from .state import default_state_path
 from .tdr import (
@@ -729,21 +735,15 @@ def _confirm(prompt: str, assume_yes: bool) -> bool:
 def _refuse_rehosted(plan: JobPlan, allow: bool) -> None:
     """Stop a job pointed at someone's own copy rather than at the origin.
 
-    A version carrying its own `url` is served from somewhere other than the
-    park's host. Sometimes that is the real source; DLP's `jan2026` is not --
-    it is a copy already downloaded and re-hosted, so archiving it captures a
-    snapshot of the archive rather than of the map.
-
     Refused rather than skipped, because which of those a given override is
-    cannot be decided from here.
+    cannot be decided from here. See :func:`tilearc.plan.rehosted_origin`.
     """
-    override = plan.version.url
-    if not override or allow:
+    if allow:
         return
-    from urllib.parse import urlparse
-
-    park_host = urlparse(plan.park.tile_template or "").hostname or "(none)"
-    other_host = urlparse(override).hostname or override
+    origin = rehosted_origin(plan)
+    if origin is None:
+        return
+    other_host, park_host = origin
     raise TilearcError(
         f"version '{plan.version.code}' of {plan.park.park_id} is served from "
         f"{other_host}, not the park's own {park_host}. A version with its own url "

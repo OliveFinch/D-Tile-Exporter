@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Slot
+from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -27,7 +27,14 @@ from tilearc.config import ParkConfig, VersionEntry
 from tilearc.downloader import CONCURRENCY_WARN_THRESHOLD, DownloadOptions
 from tilearc.errors import QuotaError, TilearcError
 from tilearc.job import JobRequest
-from tilearc.plan import DEFAULT_BYTES_PER_TILE, build_plan, load_coverage
+from tilearc.library import archive_version
+from tilearc.plan import (
+    DEFAULT_BYTES_PER_TILE,
+    build_plan,
+    load_coverage,
+    rehosted_origin,
+)
+from tilearc.state import JobState
 from tilearc.tdr import (
     WORKER_TILE_CAP,
     build_tdr_source,
@@ -63,6 +70,10 @@ LARGE_JOB_TILES = 100_000
 
 
 class DownloadTab(QWidget):
+    #: A library root that has just been written to, so the Library tab can
+    #: show what the run actually put there.
+    library_written = Signal(object)
+
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
@@ -512,6 +523,16 @@ class DownloadTab(QWidget):
         for note in plan.notes:
             lines.append(f"<span style='color:gray;'>{note}</span>")
 
+        origin = rehosted_origin(plan)
+        if origin is not None:
+            other_host, park_host = origin
+            lines.append(
+                f"<span style='color:#c0392b;'>This version is served from "
+                f"{other_host}, not {park_host}. That is usually a re-host of "
+                f"tiles someone already downloaded — archiving it copies a copy."
+                f"</span>"
+            )
+
         try:
             sources = self._build_sources()
             first = next(iter(sources.values()))
@@ -656,7 +677,11 @@ class DownloadTab(QWidget):
         if job is None:
             return None
         if self.format_combo.currentData() == "library":
-            return job / self.plan.park.park_id / self.plan.version.code
+            # Not always the version code: a park with no selectable versions
+            # (DLP is always "current") is filed under today's date instead, so
+            # downloading it again later captures the change rather than
+            # overwriting the earlier snapshot.
+            return job / self.plan.park.park_id / archive_version(self.plan)
         return job
 
     @Slot()
@@ -707,6 +732,9 @@ class DownloadTab(QWidget):
         if plan is None or output is None:
             return
 
+        if not self._confirm_rehosted():
+            return
+
         try:
             sources = self._build_sources()
         except Exception as exc:
@@ -744,6 +772,9 @@ class DownloadTab(QWidget):
             retry_missing=self.retry_missing.isChecked(),
         )
 
+        if not self._settle_state(request):
+            return
+
         self.log.clear()
         self._note(f"Downloading {plan.total_tiles:,} tiles to {self._output_path()}")
         self.progress_bar.setValue(0)
@@ -761,6 +792,66 @@ class DownloadTab(QWidget):
 
         self._thread.start()
         self._refresh_buttons()
+
+    def _confirm_rehosted(self) -> bool:
+        """Ask before archiving a version served from somewhere else.
+
+        Refusing outright is what the command line does, but it can offer a flag
+        to override; here the question itself is the flag.
+        """
+        origin = rehosted_origin(self.plan)
+        if origin is None:
+            return True
+        other_host, park_host = origin
+        answer = QMessageBox.warning(
+            self,
+            "This version is not served by the park",
+            f"Version '{self.plan.version.code}' of {self.plan.park.park_id} is "
+            f"served from {other_host}, not the park's own {park_host}.\n\n"
+            f"A version with its own URL is usually a re-host of tiles someone "
+            f"already downloaded, so archiving it copies a copy rather than the "
+            f"map.\n\nDownload it anyway?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return answer == QMessageBox.Yes
+
+    def _settle_state(self, request: JobRequest) -> bool:
+        """Deal with a resume file belonging to a different job.
+
+        The job would otherwise refuse to start, and the only cure the library
+        offers is to discard that file — which is exactly the sort of thing to
+        ask about rather than to do quietly.
+        """
+        path = request.resolved_state_path()
+        if not path.is_file():
+            return True
+        try:
+            state = JobState(path)
+            try:
+                stored = state.get_meta("fingerprint")
+            finally:
+                state.close()
+        except Exception:
+            # Unreadable is the job's problem to report, with its own message.
+            return True
+        if not stored or stored == request.plan.fingerprint():
+            return True
+
+        answer = QMessageBox.question(
+            self,
+            "There is unfinished work here for a different job",
+            f"{path.name} tracks a different set of tiles — a different zoom "
+            f"range, park or version.\n\nStarting over discards what it "
+            f"remembers, so tiles already on disk will be checked again. "
+            f"Nothing downloaded is deleted.\n\nStart over?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        request.restart = True
+        return True
 
     @Slot()
     def _stop(self) -> None:
@@ -827,6 +918,8 @@ class DownloadTab(QWidget):
                 f"Done. {outcome.downloaded:,} tiles, "
                 f"{outcome.missing:,} with no imagery. Written to {outcome.artefact}"
             )
+        if self.format_combo.currentData() == "library" and self.destination:
+            self.library_written.emit(Path(self.destination))
         self._teardown()
 
     @Slot(str)

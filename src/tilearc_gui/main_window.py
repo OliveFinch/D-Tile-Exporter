@@ -18,6 +18,7 @@ from . import APP_NAME, DEFAULT_CONFIG_URL
 from .context import AppContext
 from .doctor_tab import DoctorTab
 from .download_tab import DownloadTab
+from .library_tab import LibraryTab
 from .verify_tab import VerifyTab
 
 
@@ -35,12 +36,18 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.download_tab = DownloadTab(self.context)
+        self.library_tab = LibraryTab()
         self.verify_tab = VerifyTab()
         self.doctor_tab = DoctorTab(self.context)
         self.tabs.addTab(self.download_tab, "Download")
+        self.tabs.addTab(self.library_tab, "Library")
         self.tabs.addTab(self.verify_tab, "Verify")
         self.tabs.addTab(self.doctor_tab, "Bounds check")
         layout.addWidget(self.tabs, 1)
+
+        # A finished library download is exactly when someone wants to look at
+        # the catalogue, and the tab already knows where it is.
+        self.download_tab.library_written.connect(self.library_tab.set_root)
 
         self.setCentralWidget(central)
 

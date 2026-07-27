@@ -1,6 +1,7 @@
 # Park Tile Archiver — the desktop app
 
-A window with three tabs: **Download**, **Verify** and **Bounds check**. It runs
+A window with four tabs: **Download**, **Library**, **Verify** and
+**Bounds check**. It runs
 on macOS and Windows from one codebase, and it drives the same `tilearc` engine
 the command line uses, so both agree on every number.
 
@@ -108,9 +109,21 @@ from those files.
 2. **Zoom levels** default to the park minimum through z17. Watch the tile
    count: it roughly quadruples per extra level. Anything over 100,000 tiles
    gets a warning.
-3. **Save to** — choose a format and a folder. The exact path that will be
+3. **Coverage** — leave **Only fetch tiles measured to exist** ticked. See
+   below.
+4. **Save to** — choose a format and a folder. The exact path that will be
    written is shown underneath.
-4. **Download**.
+5. **Download**.
+
+**Coverage.** The zoom bounds in the park configs are rectangles; the drawn map
+is not, and the rectangles are wrong in both directions. Measured against the
+real servers, the declared bounds ask for about 37% more tiles than exist and
+miss around 1,700 that do. With the box ticked the job is planned from
+`tools/measured-coverage.json` — the measured footprint of every zoom of every
+park, including the L-shapes and the notches — instead of from the declared
+rectangle. The app finds that file on its own; **Choose…** points it at another.
+A park the file doesn't cover falls back to its declared bounds and says so in
+the estimate.
 
 **Speed.** *Parallel requests* and *Max requests/second* default to 5 and 10,
 which is deliberately gentle — a full-depth park at 10 req/s takes many hours.
@@ -126,10 +139,17 @@ optimistic setting costs you time instead of your access.
 The progress bar shows tiles done, bytes, throughput and time remaining, with a
 breakdown of downloaded / already there / no imagery / failed.
 
-**Formats.** *Folder of tiles* writes `{z}/{x}/{y}.jpg` exactly as the Disney
-servers lay them out. *Zip archive* packs that same structure into one file.
-*MBTiles database* produces a single file for map tools — note it stores rows
-in TMS order, as that format requires.
+**Formats.** *Library* is the one to use for archiving more than one version of
+a park — see the next section. *Folder of tiles* writes `{z}/{x}/{y}.jpg`
+exactly as the Disney servers lay them out. *Zip archive* packs that same
+structure into one file. *MBTiles database* produces a single file for map
+tools — note it stores rows in TMS order, as that format requires.
+
+**Versions served from somewhere else.** A version with its own tile URL is
+served from a host that isn't the park's. Sometimes that is the real source;
+DLP's `jan2026` is not — it is a copy already downloaded and re-hosted, so
+archiving it captures a snapshot of the archive rather than of the map. The
+estimate says so in red and the app asks before starting one.
 
 **If a run gets rate-limited.** "No imagery" is normally permanent — the tile
 is not coming back, and re-asking every run would waste tens of thousands of
@@ -150,6 +170,57 @@ A zip job that was stopped is deliberately **not** packed. It stays as a
 `.parts` staging folder until the job actually finishes — a premature archive
 would look complete while the state database marked its tiles done, so the
 missing ones could never be added later.
+
+Resume state belongs to one job: one park, one version, one zoom range. Press
+Download with different settings and the app finds a resume file tracking
+something else, so it asks whether to start over. Starting over discards what
+that file remembers, not any tiles: everything already on disk is simply
+checked again.
+
+### Library
+
+Archiving every version of a park separately stores the same tile once per
+version, and most tiles don't change between versions — a new map usually
+redraws a corner of one park. WDW alone is 575,490 tiles a version across some
+ninety versions; at 25 kB a tile that is 1.3 TB of mostly the same JPEG.
+
+Choose the **Library** format and every version goes into one tree:
+
+```
+library/
+  catalogue.sqlite
+  wdw/
+    47/        <- oldest version archived: the full map
+      11/555/851.jpg
+    105/       <- only the tiles that differ from 47
+      17/35712/54688.jpg
+```
+
+Download oldest first. A tile is written only when its bytes differ from what
+an earlier version already holds, so a later version's folder contains exactly
+what that update changed.
+
+Which means the folders lie: `wdw/105/11/0/0.jpg` not existing does **not**
+mean version 105 lacks that tile — it means 105 didn't change it. The catalogue
+is what says, for every tile of every version, which folder actually holds the
+bytes, and this tab is how you read it.
+
+It lists each park and version with how many tiles it has, how many are stored
+in its own folder, how many are shared with an earlier version, and whether the
+run finished. Underneath is what not storing the copies has saved. **Where
+is…** answers the folder question for one tile: type a park, version and
+`z`/`x`/`y` and it gives the path on disk, naming the version that holds it
+when that isn't the one you asked about. (The *mode* box is for Tokyo only,
+whose map exists twice — `daytime` and `nighttime`.)
+
+The tab points itself at the library a download just wrote to; **Choose library
+folder…** opens any other.
+
+**Parks with no version history.** DLP has no selectable servers — it is always
+"current". Filing every download of it under `current` would have each one
+overwrite the last, so those go into a folder named for the date instead:
+`dlp/2026-07-27/`. Download it again in six months and you get a second
+snapshot, with only the tiles that changed stored in it.
 
 ### Missing tiles are normal
 
