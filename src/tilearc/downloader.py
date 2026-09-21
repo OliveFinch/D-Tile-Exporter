@@ -115,7 +115,7 @@ class Downloader:
         self._had_success = False
         #: A few of the most recent tiles called missing, kept so one can be
         #: re-requested to check the verdict. Coordinates only; nothing large.
-        self._recent_missing: deque[tuple[int, int, int, str]] = deque(maxlen=64)
+        self._recent_missing: deque[tuple[int, int, int, str, str]] = deque(maxlen=64)
         #: The `_missing_run` length at which to next verify. Raised after each
         #: check that comes back clean, so a genuinely sparse park is not
         #: re-probed every few hundred tiles for the whole run.
@@ -126,6 +126,40 @@ class Downloader:
 
     def _source(self, mode: str) -> TileSource:
         return self.sources[mode] if mode in self.sources else next(iter(self.sources.values()))
+
+    # -- what a subclass varies --------------------------------------------
+    # A chain job fetches the same coordinate from every version of a park, so
+    # the source, the destination and the resume record all depend on which
+    # version is in hand. Everything else about fetching a tile -- the retries,
+    # the classification, the rate limiting, the refusal detection -- is the
+    # same either way, and is worth having in exactly one place.
+
+    def _source_for(self, mode: str, version: str) -> TileSource:
+        return self._source(mode)
+
+    def _store_tile(
+        self, z: int, x: int, y: int, mode: str, version: str,
+        body: bytes, etag: str | None, digest: str, attempts: int,
+    ) -> None:
+        self.writer.write_tile(z, x, y, mode, body)
+        self.state.record(
+            z, x, y, mode, STATUS_DONE,
+            size=len(body), etag=etag, sha256=digest, attempts=attempts,
+        )
+
+    def _note_missing(
+        self, z: int, x: int, y: int, mode: str, version: str, attempts: int
+    ) -> None:
+        self.state.record(z, x, y, mode, STATUS_MISSING, attempts=attempts)
+
+    def _note_failed(
+        self, z: int, x: int, y: int, mode: str, version: str, attempts: int
+    ) -> None:
+        self.state.record(z, x, y, mode, STATUS_FAILED, attempts=attempts)
+
+    async def _handle(self, client: httpx.AsyncClient, limiter, item) -> None:
+        """Do one unit of queued work. For a chain that is a whole version run."""
+        await self._fetch_tile(client, limiter, *item)
 
     def _abort(self, reason: BaseException) -> None:
         if self._abort_reason is None:
@@ -193,8 +227,8 @@ class Downloader:
 
         self._verifying = True
         try:
-            z, x, y, mode = random.choice(list(self._recent_missing))
-            source = self._source(mode)
+            z, x, y, mode, version = random.choice(list(self._recent_missing))
+            source = self._source_for(mode, version)
             headers = self._headers.setdefault(mode, source.request_headers())
             await limiter.acquire()
             try:
@@ -231,9 +265,10 @@ class Downloader:
     # -- one tile ----------------------------------------------------------
 
     async def _fetch_tile(
-        self, client: httpx.AsyncClient, limiter, z: int, x: int, y: int, mode: str
+        self, client: httpx.AsyncClient, limiter,
+        z: int, x: int, y: int, mode: str, version: str = "",
     ) -> None:
-        source = self._source(mode)
+        source = self._source_for(mode, version)
         url = source.url(z, x, y)
         headers = self._headers.setdefault(mode, source.request_headers())
         attempts = 0
@@ -259,13 +294,9 @@ class Downloader:
                 self._next_missing_check = 0
                 self._seen += 1
                 digest = hashlib.sha256(body).hexdigest()
-                self.writer.write_tile(z, x, y, mode, body)
-                self.state.record(
-                    z, x, y, mode, STATUS_DONE,
-                    size=len(body),
-                    etag=response.headers.get("ETag"),
-                    sha256=digest,
-                    attempts=attempts,
+                self._store_tile(
+                    z, x, y, mode, version, body,
+                    response.headers.get("ETag"), digest, attempts,
                 )
                 self.result.fetched += 1
                 self.result.total_bytes += len(body)
@@ -276,8 +307,8 @@ class Downloader:
                 self._error_streak = 0
                 self._seen += 1
                 self._missing_run += 1
-                self._recent_missing.append((z, x, y, mode))
-                self.state.record(z, x, y, mode, STATUS_MISSING, attempts=attempts)
+                self._recent_missing.append((z, x, y, mode, version))
+                self._note_missing(z, x, y, mode, version, attempts)
                 self.result.missing += 1
                 self.progress.update(missing=1)
                 self._check_all_missing()
@@ -285,7 +316,7 @@ class Downloader:
                 return
 
             if outcome == Outcome.AUTH:
-                self.state.record(z, x, y, mode, STATUS_FAILED, attempts=attempts)
+                self._note_failed(z, x, y, mode, version, attempts)
                 self._abort(
                     CredentialsExpiredError(
                         f"the tile server rejected our credentials (HTTP {status}) for "
@@ -307,7 +338,7 @@ class Downloader:
 
             if attempts > self.options.retries:
                 self._error_streak += 1
-                self.state.record(z, x, y, mode, STATUS_FAILED, attempts=attempts)
+                self._note_failed(z, x, y, mode, version, attempts)
                 self.result.failed += 1
                 self.progress.update(failed=1)
                 self.log(f"giving up on {z}/{x}/{y} after {attempts} attempts ({last_error})")
@@ -370,7 +401,7 @@ class Downloader:
                         return
                     if self._stop.is_set():
                         continue
-                    await self._fetch_tile(client, limiter, *item)
+                    await self._handle(client, limiter, item)
                 finally:
                     queue.task_done()
 

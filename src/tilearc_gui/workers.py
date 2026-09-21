@@ -169,3 +169,73 @@ class DownloadWorker(QObject):
             loop.call_soon_threadsafe(downloader.request_stop)
         except RuntimeError:
             pass  # the loop already finished
+
+
+class ChainWorker(QObject):
+    """Runs one chain job: every version of a park, coordinate by coordinate.
+
+    The same shape as :class:`DownloadWorker` -- an asyncio loop on its own
+    thread, reachable from the UI thread for Stop -- because from the window's
+    point of view a chain is just a much longer download.
+    """
+
+    progressed = Signal(dict)
+    logged = Signal(str)
+    resumed = Signal(dict)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, request) -> None:
+        super().__init__()
+        self._request = request
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._downloader = None
+        self._stop_requested = False
+
+    @Slot()
+    def run(self) -> None:  # pragma: no cover - exercised through the UI
+        from tilearc.chain import run_chain
+
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+
+        progress = SignalProgress(
+            self._request.plan.total_requests, self.progressed.emit
+        )
+        try:
+            outcome = loop.run_until_complete(
+                run_chain(
+                    self._request,
+                    progress,
+                    log=self.logged.emit,
+                    on_resume=self.resumed.emit,
+                    on_downloader=self._capture_downloader,
+                )
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+        else:
+            self.progressed.emit(progress.snapshot())
+            self.finished.emit(outcome)
+        finally:
+            self._loop = None
+            self._downloader = None
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def _capture_downloader(self, downloader) -> None:
+        self._downloader = downloader
+        if self._stop_requested:
+            self.stop()
+
+    @Slot()
+    def stop(self) -> None:
+        self._stop_requested = True
+        loop, downloader = self._loop, self._downloader
+        if loop is None or downloader is None:
+            return
+        try:
+            loop.call_soon_threadsafe(downloader.request_stop)
+        except RuntimeError:
+            pass

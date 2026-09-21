@@ -280,6 +280,45 @@ below `999`.
 The tab points itself at the library a download just wrote to; **Choose library
 folder…** opens any other, as does typing a path or dropping a folder on it.
 
+### Initial copy — every version
+
+Archiving a park a version at a time means starting, watching and resuming
+ninety-three separate jobs. **Initial copy — every version…** on the Download
+tab does the lot in one run. It takes one tile position and walks it through
+every version oldest first —
+
+```
+47/19/90412/209771.jpg → 105/19/90412/209771.jpg → … → 671203034/19/90412/209771.jpg
+```
+
+— storing a tile only where its bytes differ from what an earlier version
+already holds, and then moves to the next position. It always writes a library,
+because that sharing is the whole point of it.
+
+**It is not fewer requests.** Ninety-three versions of 575,490 tiles is
+53,520,570 either way round; turning the loop inside out does not shrink the
+product. At 10 requests/second that is about two months, at 21 about a month.
+What it saves is the babysitting, not the fetching — the button says so before
+it starts, with the arithmetic for the park and zoom range you picked.
+
+The two things to weigh:
+
+- **Stopping half way leaves every version part-archived**, rather than the
+  oldest ones finished and the rest untouched. That is the price of this order.
+  Nothing is lost — it resumes exactly, including part-way through a tile's
+  chain — but a half-finished chain is not a usable archive of anything yet.
+- **Only one version's footprint has been measured**, so the others will report
+  tiles they never had as *no imagery*. That is the park's history rather than a
+  fault: the map grew, and the versions that predate a corner of it genuinely
+  have nothing there. Those absences are recorded in the catalogue, which is
+  what makes a resume skip them instead of asking again every run — and what
+  lets you ask later when a given tile first appeared.
+
+Resume is coordinate by coordinate. The state database holds one row per tile
+position rather than one per position per version, which is the difference
+between 575,490 rows and 53,520,570; within a position it is the catalogue that
+remembers which versions are already settled.
+
 **Parks with no version history.** DLP has no selectable servers — it is always
 "current". Filing every download of it under `current` would have each one
 overwrite the last, so those go into a folder named for the date instead:

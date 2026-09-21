@@ -46,7 +46,7 @@ from tilearc.urls import build_source
 from .context import AppContext
 from .formatting import human_bytes, human_duration
 from .pickers import choose_directory, choose_file, dropped_directory
-from .workers import DownloadWorker, run_async
+from .workers import ChainWorker, DownloadWorker, run_async
 
 FORMAT_CHOICES = [
     ("library", "Library  —  {park}/{version}/{z}/{x}/{y}.jpg, shared across versions"),
@@ -310,6 +310,17 @@ class DownloadTab(QWidget):
         outer.addWidget(self.log, 1)
 
         button_row = QHBoxLayout()
+        self.chain_button = QPushButton("Initial copy — every version…")
+        self.chain_button.setEnabled(False)
+        self.chain_button.setToolTip(
+            "Archives every version of this park in one run, walking each tile "
+            "position through the versions oldest first and keeping only what "
+            "changed.\n\n"
+            "It is not fewer requests than doing them one at a time — it is the "
+            "same number in one job instead of ninety."
+        )
+        self.chain_button.clicked.connect(self._start_chain)
+        button_row.addWidget(self.chain_button)
         button_row.addStretch(1)
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
@@ -795,6 +806,12 @@ class DownloadTab(QWidget):
             and self.destination is not None
         )
         self.download_button.setEnabled(ready)
+        # A chain needs versions and a folder, but not a single chosen version.
+        self.chain_button.setEnabled(
+            not running and bool(getattr(self, "_all_versions", None))
+            and self.plan is not None and self.plan.total_tiles > 0
+            and self.destination is not None
+        )
         self.stop_button.setEnabled(running)
         for widget in (
             self.park_combo, self.version_combo, self.inactive_check,
@@ -898,6 +915,165 @@ class DownloadTab(QWidget):
             QMessageBox.Cancel,
         )
         return answer == QMessageBox.Yes
+
+    # ---------------------------------------------------------------- chain
+
+    def _chain_versions(self) -> list[VersionEntry]:
+        """Every version of this park, oldest first.
+
+        In the order the viewer lists them, which is the order they were
+        published. Deliberately not sorted by the dates parsed out of the
+        labels: Hong Kong's nine oldest servers are labelled only "Unknown N",
+        and a date sort would file them after everything that does have one.
+        """
+        return list(self._all_versions)
+
+    def _build_chain_sources(self, plan) -> dict:
+        """A tile source per (mode, version), mirroring the single-version one."""
+        from tilearc.chain import build_chain_sources
+
+        if plan.park.requires_credentials:
+            credentials = load_credentials(plan.park, self._credentials_path())
+            direct = bool(self.tdr_route.currentData())
+
+            def make(entry, mode):
+                return build_tdr_source(
+                    plan.park, entry.code, mode, credentials, direct=direct
+                )
+        else:
+            def make(entry, mode):
+                return build_source(plan.park, entry)
+
+        return build_chain_sources(plan, make)
+
+    def _chain_plan(self):
+        """A chain over this park's whole history at the chosen zooms."""
+        from tilearc.chain import ChainPlan
+
+        if self.plan is None or self.park is None:
+            return None
+        versions = self._chain_versions()
+        if not versions:
+            return None
+        return ChainPlan(
+            park=self.park,
+            versions=versions,
+            coordinates=self.plan,
+            modes=self.plan.modes,
+        )
+
+    def _confirm_chain(self, plan) -> bool:
+        """State the size of it before a month-long job starts.
+
+        Every number here is one someone should see before committing: the
+        request count, because it is the same as doing the versions one at a
+        time and nobody should start this expecting otherwise; and the time,
+        because at a polite rate it is measured in weeks.
+        """
+        rate = float(self.rps.value()) or float(self.concurrency.value())
+        seconds = plan.total_requests / max(rate, 0.1)
+        older = len(plan.versions) - 1
+        answer = QMessageBox.question(
+            self,
+            "Archive every version of this park",
+            f"{len(plan.versions)} versions × {plan.tiles_per_version:,} tiles "
+            f"= <b>{plan.total_requests:,} requests</b>, about "
+            f"{human_duration(seconds)} at {rate:g} requests/second."
+            f"<br><br>"
+            f"Each tile position is walked through every version oldest first, "
+            f"and a tile is stored only where its bytes differ from what an "
+            f"earlier version already holds.<br><br>"
+            f"<b>This is not fewer requests</b> than archiving the versions one "
+            f"at a time — it is the same number in one job. What it saves is "
+            f"the babysitting.<br><br>"
+            f"Two things worth knowing:<br>"
+            f"• Stopping half way leaves <i>every</i> version part-archived, "
+            f"not the oldest ones finished.<br>"
+            f"• The measured footprint describes one version, so the other "
+            f"{older} will report tiles they never had as “no imagery”. That is "
+            f"the map's history, and it is recorded rather than lost.<br><br>"
+            f"Start it?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        return answer == QMessageBox.Yes
+
+    @Slot()
+    def _start_chain(self) -> None:
+        from tilearc.chain import ChainRequest
+
+        if self.destination is None:
+            return
+        plan = self._chain_plan()
+        if plan is None or plan.tiles_per_version == 0:
+            QMessageBox.information(
+                self, "Nothing to archive",
+                "No versions or no tiles at these zoom levels.",
+            )
+            return
+
+        try:
+            sources = self._build_chain_sources(plan)
+        except Exception as exc:
+            QMessageBox.critical(self, "Cannot build tile URLs", str(exc))
+            return
+
+        if not self._confirm_chain(plan):
+            return
+
+        request = ChainRequest(
+            plan=plan,
+            sources=sources,
+            root=self.destination,
+            options=DownloadOptions(
+                concurrency=self.concurrency.value(),
+                rps=float(self.rps.value()),
+                adaptive=self.adaptive.isChecked(),
+            ),
+        )
+
+        self.log.clear()
+        self._note(
+            f"Archiving {len(plan.versions)} versions of {plan.park.park_id} as a "
+            f"library — {plan.total_requests:,} requests to {self.destination}"
+        )
+        self.progress_bar.setValue(0)
+
+        self._worker = ChainWorker(request)
+        self._thread = QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progressed.connect(self._on_progress)
+        self._worker.logged.connect(self._note)
+        self._worker.resumed.connect(self._on_resumed)
+        self._worker.finished.connect(self._on_chain_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._thread.start()
+        self._refresh_buttons()
+
+    @Slot(object)
+    def _on_chain_finished(self, outcome) -> None:
+        saved = outcome.manifest.get("bytesSavedBySharing", 0)
+        if outcome.stopped_early:
+            self._note(
+                f"Stopped. {outcome.coordinates_done:,} tile positions finished "
+                f"across all versions; the rest resume where they left off."
+            )
+        elif outcome.result.failed:
+            self._note(
+                f"Finished with {outcome.result.failed:,} failed request(s). "
+                f"Press the button again to retry just those."
+            )
+        else:
+            self._note(
+                f"Done. {outcome.result.fetched:,} tiles fetched, "
+                f"{outcome.result.missing:,} absent from the versions that "
+                f"never had them. Written to {outcome.root}"
+            )
+        if saved:
+            self._note(f"Not storing unchanged tiles twice saved {human_bytes(saved)}.")
+        self.library_written.emit(Path(self.destination))
+        self._teardown()
 
     def _confirm_coverage_version(self) -> bool:
         """Ask before archiving one version using another version's footprint.

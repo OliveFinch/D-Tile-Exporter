@@ -1448,3 +1448,175 @@ def test_an_undated_version_says_so_rather_than_guessing(qapp, tmp_path):
     tip = tab.table.item(0, 2).toolTip()
     assert "when this map is from" in tip
     assert "Unknown 1" in tip, "say which label was read, not just that it failed"
+
+
+# ---------------------------------------------------------------------------
+# the initial copy: every version in one run
+# ---------------------------------------------------------------------------
+
+
+def _chain_ready(qapp, context, tmp_path, park="wdw"):
+    tab = DownloadTab(context)
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, park)
+    drain(qapp)
+    tab._set_destination(tmp_path)
+    return tab
+
+
+def test_the_chain_button_needs_a_folder_and_a_park(qapp, context, tmp_path):
+    tab = DownloadTab(context)
+    assert not tab.chain_button.isEnabled()
+
+    tab.reload_parks()
+    drain(qapp)
+    select(tab.park_combo, "wdw")
+    drain(qapp)
+    assert not tab.chain_button.isEnabled(), "no folder yet"
+
+    tab._set_destination(tmp_path)
+    assert tab.chain_button.isEnabled()
+
+
+def test_a_chain_covers_every_version_oldest_first(qapp, context, tmp_path):
+    """Hong Kong's oldest nine are labelled "Unknown N", so a date sort would
+    file the start of its history after the end of it."""
+    tab = _chain_ready(qapp, context, tmp_path, park="hkdl")
+    plan = tab._chain_plan()
+
+    listed = [tab._all_versions[i].code for i in range(len(tab._all_versions))]
+    assert [v.code for v in plan.versions] == listed
+    assert plan.versions[0].code == "19"
+
+
+def test_a_chain_multiplies_out_to_the_same_requests(qapp, context, tmp_path):
+    tab = _chain_ready(qapp, context, tmp_path)
+    tab.min_zoom.setValue(11)
+    tab.max_zoom.setValue(12)
+    drain(qapp)
+
+    plan = tab._chain_plan()
+    assert plan.tiles_per_version == tab.plan.total_tiles
+    assert plan.total_requests == plan.tiles_per_version * len(plan.versions)
+
+
+def test_the_chain_says_how_big_it_is_before_starting(qapp, context, tmp_path, monkeypatch):
+    """53 million requests should not begin because someone clicked a button."""
+    from PySide6.QtWidgets import QMessageBox
+
+    tab = _chain_ready(qapp, context, tmp_path)
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *args, **kwargs: (asked.append(args[2]), QMessageBox.Cancel)[1],
+    )
+    tab._start_chain()
+    drain(qapp)
+
+    assert asked, "a month-long job must be confirmed"
+    text = asked[0]
+    assert "requests" in text
+    assert "not fewer requests" in text, "say plainly that it saves no fetching"
+    assert "Stopping half way" in text
+    assert tab._thread is None, "cancelling must not start it"
+
+
+def test_a_chain_builds_a_source_for_every_version(qapp, context, tmp_path):
+    tab = _chain_ready(qapp, context, tmp_path)
+    plan = tab._chain_plan()
+    sources = tab._build_chain_sources(plan)
+
+    assert len(sources) == len(plan.versions)
+    for entry in plan.versions:
+        source = sources[("", entry.code)]
+        assert entry.code in source.template, f"{entry.code} not in its own URL"
+
+
+def test_a_tdr_chain_builds_one_source_per_version_and_mode(qapp, context, tmp_path):
+    tab = _chain_ready(qapp, context, tmp_path, park="tdr")
+    select(tab.tdr_mode, "both")
+    drain(qapp)
+
+    plan = tab._chain_plan()
+    sources = tab._build_chain_sources(plan)
+    assert set(plan.modes) == {"daytime", "nighttime"}
+    assert len(sources) == len(plan.versions) * 2
+    assert all((mode, plan.versions[0].code) in sources for mode in plan.modes)
+
+
+def test_a_chain_built_by_the_tab_runs_end_to_end(qapp, context, tmp_path):
+    """The tab's plan and sources, through the real chain, onto disk.
+
+    The engine and the button are tested apart; this is the join between them.
+    """
+    import asyncio
+    from contextlib import contextmanager
+
+    import httpx
+    from tilearc.chain import ChainRequest, run_chain
+    from tilearc.downloader import DownloadOptions
+    from tilearc.library import Catalogue
+    from tilearc.progress import Progress
+
+    tab = _chain_ready(qapp, context, tmp_path)
+    tab.min_zoom.setValue(11)
+    tab.max_zoom.setValue(11)
+    drain(qapp)
+    plan = tab._chain_plan()
+    # Keep it small: the first three versions of one zoom.
+    plan.versions = plan.versions[:3]
+
+    bodies = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        # Every version serves the same bytes but the newest, which differs.
+        code = [p for p in request.url.path.split("/") if p][-4]
+        bodies.setdefault(code, 0)
+        bodies[code] += 1
+        content = b"NEWER" if code == plan.versions[-1].code else b"same!"
+        return httpx.Response(200, content=content)
+
+    @contextmanager
+    def faked():
+        import tilearc.downloader as module
+        transport = httpx.MockTransport(handle)
+        real = module.httpx.AsyncClient
+
+        class Patched(real):
+            def __init__(self, **kw):
+                kw.pop("limits", None)
+                kw["transport"] = transport
+                super().__init__(**kw)
+
+        module.httpx.AsyncClient = Patched
+        try:
+            yield
+        finally:
+            module.httpx.AsyncClient = real
+
+    request = ChainRequest(
+        plan=plan,
+        sources=tab._build_chain_sources(plan),
+        root=tmp_path,
+        options=DownloadOptions(concurrency=2, rps=0, retries=1, backoff_base=0.001),
+    )
+    with faked():
+        outcome = asyncio.run(run_chain(request, Progress(plan.total_requests, enabled=False)))
+
+    assert outcome.complete
+    assert outcome.result.fetched == plan.total_requests
+
+    catalogue = Catalogue(tmp_path)
+    try:
+        held = {row["version"] for row in catalogue.versions("wdw")}
+        stored = catalogue.stats()
+    finally:
+        catalogue.close()
+
+    assert held == {v.code for v in plan.versions}
+    by_version = {row["version"]: row for row in stored}
+    oldest, newest = plan.versions[0].code, plan.versions[-1].code
+    assert by_version[oldest]["stored"] == by_version[oldest]["tiles"]
+    assert by_version[plan.versions[1].code]["stored"] == 0, "unchanged, all shared"
+    assert by_version[newest]["stored"] == by_version[newest]["tiles"], "all changed"
