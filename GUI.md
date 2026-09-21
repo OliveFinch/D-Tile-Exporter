@@ -254,13 +254,28 @@ mean version 105 lacks that tile — it means 105 didn't change it. The catalogu
 is what says, for every tile of every version, which folder actually holds the
 bytes, and this tab is how you read it.
 
-It lists each park and version with how many tiles it has, how many are stored
-in its own folder, how many are shared with an earlier version, and whether the
-run finished. Underneath is what not storing the copies has saved. **Where
-is…** answers the folder question for one tile: type a park, version and
-`z`/`x`/`y` and it gives the path on disk, naming the version that holds it
-when that isn't the one you asked about. (The *mode* box is for Tokyo only,
-whose map exists twice — `daytime` and `nighttime`.)
+It lists each park and version with the date its map is from, how many tiles it
+has, how many are stored in its own folder, how many are shared with an earlier
+version, and whether the run finished. Underneath is what not storing the
+copies has saved. **Where is…** answers the folder question for one tile: type
+a park, version and `z`/`x`/`y` and it gives the path on disk, naming the
+version that holds it when that isn't the one you asked about. (The *mode* box
+is for Tokyo only, whose map exists twice — `daytime` and `nighttime`.)
+
+**The Date column.** Server codes are not in order — WDW runs 47, 105, 106 …
+and then jumps to 900014458 and 671203034 — so sorting by code tells you
+nothing about which map came first, which with ninety-three of them spanning
+nine years is most of what you want to know. No date is stored as a date, so it
+is read out of the label the viewer gave the version when it was archived
+(`May '17`, `Aug '18 (Late)`, `April 2019`), or out of the code where that is
+itself a timestamp, as Tokyo's is. A dated snapshot folder is already the
+answer. Where nothing says — Hong Kong lists nine servers called only
+`Unknown 1` through `Unknown 9` — the cell shows `—` rather than a guess, and
+the tooltip says which label it read.
+
+The table opens sorted oldest first. Click any header to sort by that column;
+the counts sort as numbers and the sizes as sizes, so `1,000` doesn't come out
+below `999`.
 
 The tab points itself at the library a download just wrote to; **Choose library
 folder…** opens any other, as does typing a path or dropping a folder on it.

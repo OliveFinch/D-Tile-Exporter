@@ -909,8 +909,8 @@ def _library(root):
         bounds_by_zoom={11: TileBounds(0, 1, 0, 1)},
     )
 
-    def archive(version, tiles, complete=True):
-        plan = JobPlan(park=park, version=VersionEntry(code=version),
+    def archive(version, tiles, complete=True, label=None):
+        plan = JobPlan(park=park, version=VersionEntry(code=version, label=label),
                        zooms=[ZoomPlan(11, TileBounds(0, 1, 0, 1))], modes=[])
         writer = LibraryWriter(root, plan)
         writer.open()
@@ -919,8 +919,11 @@ def _library(root):
         writer.finalize({"park": {"id": "wdw"}}, complete=complete)
         writer.catalogue.close()
 
-    archive("47", {(11, 0, 0): b"aaaa", (11, 0, 1): b"bbbb"})
-    archive("105", {(11, 0, 0): b"aaaa", (11, 0, 1): b"CHANGED"}, complete=False)
+    # The labels are what the viewer really calls these two servers, and the
+    # only record of when their maps are from.
+    archive("47", {(11, 0, 0): b"aaaa", (11, 0, 1): b"bbbb"}, label="May '17")
+    archive("105", {(11, 0, 0): b"aaaa", (11, 0, 1): b"CHANGED"},
+            complete=False, label="Jun '18")
 
 
 def test_library_tab_lists_what_the_archive_holds(qapp, tmp_path):
@@ -938,11 +941,11 @@ def test_library_tab_lists_what_the_archive_holds(qapp, tmp_path):
         for r in range(tab.table.rowCount())
     }
     assert rows["47"][0] == "wdw"
-    assert rows["47"][2] == "2" and rows["47"][3] == "2"   # both stored here
-    assert rows["105"][2] == "2" and rows["105"][3] == "1"  # one reused
-    assert rows["105"][4] == "1"
-    assert rows["47"][6] == "yes"
-    assert rows["105"][6] == "unfinished"
+    assert rows["47"][3] == "2" and rows["47"][4] == "2"   # both stored here
+    assert rows["105"][3] == "2" and rows["105"][4] == "1"  # one reused
+    assert rows["105"][5] == "1"
+    assert rows["47"][7] == "yes"
+    assert rows["105"][7] == "unfinished"
     assert "saves" in tab.summary.text()
 
 
@@ -1361,3 +1364,87 @@ def test_switching_coverage_off_clears_the_mismatch(qapp, context, tmp_path):
 
     tab.use_coverage.setChecked(False)
     assert tab.measured_against is None, "no coverage in use, nothing to mismatch"
+
+
+# ---------------------------------------------------------------------------
+# dating the versions, so ninety of them read as a chronology
+# ---------------------------------------------------------------------------
+
+
+def test_the_library_dates_each_version_from_its_label(qapp, tmp_path):
+    """The codes are not ordered; 47 and 105 are May '17 and Jun '18."""
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+
+    dates = {
+        tab.table.item(r, 1).text(): tab.table.item(r, 2).text()
+        for r in range(tab.table.rowCount())
+    }
+    assert dates == {"47": "2017-05", "105": "2018-06"}
+
+
+def test_the_library_opens_sorted_oldest_first(qapp, tmp_path):
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+
+    order = [tab.table.item(r, 1).text() for r in range(tab.table.rowCount())]
+    assert order == ["47", "105"], "by code alone 105 would come first"
+
+
+def test_clicking_a_column_sorts_by_what_it_means(qapp, tmp_path):
+    """As text "1,000" sorts before "999", which would make the counts lie."""
+    from PySide6.QtCore import Qt
+    from tilearc_gui.library_tab import LibraryTab
+
+    _library(tmp_path)
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    assert tab.table.isSortingEnabled()
+
+    # Reverse the date order and back again; the rows must follow.
+    tab.table.sortItems(2, Qt.DescendingOrder)
+    assert [tab.table.item(r, 1).text() for r in range(2)] == ["105", "47"]
+    tab.table.sortItems(2, Qt.AscendingOrder)
+    assert [tab.table.item(r, 1).text() for r in range(2)] == ["47", "105"]
+
+
+def test_a_version_number_sorts_as_a_number(qapp, tmp_path):
+    from tilearc_gui.library_tab import _Cell
+
+    cells = [_Cell("999", 999), _Cell("1,000", 1000)]
+    assert cells[0] < cells[1], "1,000 must not sort below 999"
+    assert sorted(cells)[0].text() == "999"
+
+
+def test_an_undated_version_says_so_rather_than_guessing(qapp, tmp_path):
+    """Hong Kong lists nine servers labelled only "Unknown N"."""
+    from tilearc.config import ParkConfig, TileBounds, VersionEntry
+    from tilearc.library import LibraryWriter
+    from tilearc.plan import JobPlan, ZoomPlan
+    from tilearc_gui.library_tab import LibraryTab
+
+    park = ParkConfig(
+        park_id="hkdl", label="HKDL", tile_template="https://cdn/{z}/{x}/{y}.jpg",
+        min_zoom=11, max_zoom=11, y_scheme="xyz",
+        bounds_by_zoom={11: TileBounds(0, 1, 0, 1)},
+    )
+    plan = JobPlan(park=park, version=VersionEntry(code="19", label="Unknown 1"),
+                   zooms=[ZoomPlan(11, TileBounds(0, 1, 0, 1))], modes=[])
+    writer = LibraryWriter(tmp_path, plan)
+    writer.open()
+    writer.write_tile(11, 0, 0, "", b"aaaa")
+    writer.finalize({"park": {"id": "hkdl"}}, complete=True)
+    writer.catalogue.close()
+
+    tab = LibraryTab()
+    tab.set_root(tmp_path)
+    assert tab.table.item(0, 2).text() == "—"
+    tip = tab.table.item(0, 2).toolTip()
+    assert "when this map is from" in tip
+    assert "Unknown 1" in tip, "say which label was read, not just that it failed"
