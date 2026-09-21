@@ -56,6 +56,12 @@ class DownloadOptions:
     error_streak_limit: int = 50
     #: Abort if the first N responses are all "missing" (see _check_all_missing).
     all_missing_probe: int = 200
+    #: For a chain: abort if this many whole tile positions come back absent
+    #: from *every* version before anything at all downloads. Counted in
+    #: positions rather than responses because a chain asks each position of
+    #: every version, so 200 responses can be only three positions -- far too
+    #: little to condemn a job on. See `ChainDownloader._check_all_missing`.
+    chain_absent_probe: int = 25
     #: After this many consecutive "missing" responses *following* successful
     #: ones, re-request one of them to check the verdict is real. 0 disables.
     #: See :meth:`Downloader._verify_missing_run`.

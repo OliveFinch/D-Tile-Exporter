@@ -1055,9 +1055,13 @@ class DownloadTab(QWidget):
     def _on_chain_finished(self, outcome) -> None:
         saved = outcome.manifest.get("bytesSavedBySharing", 0)
         if outcome.stopped_early:
+            # Say why. A chain that stops without a reason is the same silent
+            # failure this whole archive has been fighting.
+            if outcome.error is not None:
+                self._note(f"Stopped: {outcome.error}")
             self._note(
-                f"Stopped. {outcome.coordinates_done:,} tile positions finished "
-                f"across all versions; the rest resume where they left off."
+                f"{outcome.coordinates_done:,} tile positions finished across "
+                f"all versions; the rest resume where they left off."
             )
         elif outcome.result.failed:
             self._note(

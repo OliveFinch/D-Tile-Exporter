@@ -43,6 +43,7 @@ import httpx
 
 from .config import ParkConfig, VersionEntry
 from .downloader import Downloader
+from .errors import TilearcError
 from .library import CATALOGUE_NAME, Catalogue, LibraryWriter
 from .manifest import MANIFEST_NAME
 from .plan import JobPlan, ZoomPlan
@@ -209,8 +210,49 @@ class ChainDownloader(Downloader):
         self.chain = plan
         self.chain_writer = writer
         self._chain_sources = dict(sources)
+        #: Tile positions that came back absent from every version of the park.
+        self._absent_positions = 0
 
     # -- what the chain varies ---------------------------------------------
+
+    def _check_all_missing(self) -> None:
+        """Not per response. A chain counts whole positions.
+
+        The inherited check aborts once 200 responses in a row are "no tile
+        here" with nothing yet downloaded, which is right for a job that asks
+        each position once. A chain asks each position of every version, so for
+        a park with sixty-seven of them 200 responses is three positions -- and
+        three bad coordinates at the start of a footprint is nowhere near
+        enough to condemn a month-long job. Counting positions absent from
+        *all* versions asks the question that actually matters.
+        """
+        return
+
+    def _check_absent_positions(self) -> None:
+        probe = self.options.chain_absent_probe
+        if self._had_success or probe <= 0 or self._absent_positions < probe:
+            return
+
+        # Name a URL. Whether these coordinates exist is settled in a browser
+        # in ten seconds, and no amount of reasoning here substitutes for it.
+        example = ""
+        if self._recent_missing:
+            z, x, y, mode, version = self._recent_missing[-1]
+            example = self._source_for(mode, version).url(z, x, y)
+
+        self._abort(TilearcError(
+            f"{self._absent_positions} tile positions in a row were absent from "
+            f"all {len(self.chain.versions)} versions, and nothing has "
+            f"downloaded. Stopping rather than asking the other "
+            f"{self.chain.total_requests:,} times.\n"
+            f"  The coordinates are the thing to doubt, not the server: the "
+            f"footprint was measured against one version, and a chain applies "
+            f"it to every one of them.\n"
+            f"  Open this in a browser — if it loads, the tiles are there and "
+            f"the fault is here; if it 404s, these coordinates are simply not "
+            f"on the server:\n"
+            f"    {example}"
+        ))
 
     def _source_for(self, mode: str, version: str) -> TileSource:
         source = self._chain_sources.get((mode, version))
@@ -253,14 +295,33 @@ class ChainDownloader(Downloader):
         """Walk one coordinate through every version, oldest first."""
         z, x, y, mode = item
         before = self.result.failed
+        fetched_before = self.result.fetched
+        asked = held = 0
         for entry in self.chain.versions:
             if self._stop.is_set():
                 return  # not finished; the coordinate stays pending
             if self.chain_writer.settled(entry.code, z, x, y, mode):
+                held += 1
                 self.result.skipped += 1
                 self.progress.update(skipped=1)
                 continue
+            asked += 1
             await self._fetch_tile(client, limiter, z, x, y, mode, entry.code)
+
+        # A position nobody has ever had is the chain's version of "everything
+        # is missing"; one proves nothing, a run of them does.
+        #
+        # `held` is why this counts positions rather than responses. Start a
+        # chain over a library that already has some of these versions and the
+        # versions that *do* have the tile are skipped rather than fetched, so
+        # nothing is downloaded and the older ones legitimately 404 -- which
+        # looks identical to a job asking for coordinates that do not exist.
+        # It is not: the archive already holds this position.
+        if asked and not held and self.result.fetched == fetched_before:
+            self._absent_positions += 1
+            self._check_absent_positions()
+        else:
+            self._absent_positions = 0
 
         if self.result.failed == before:
             # Every version of this coordinate is now either held or known

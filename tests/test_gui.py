@@ -1620,3 +1620,30 @@ def test_a_chain_built_by_the_tab_runs_end_to_end(qapp, context, tmp_path):
     assert by_version[oldest]["stored"] == by_version[oldest]["tiles"]
     assert by_version[plan.versions[1].code]["stored"] == 0, "unchanged, all shared"
     assert by_version[newest]["stored"] == by_version[newest]["tiles"], "all changed"
+
+
+def test_a_stopped_chain_says_why(qapp, context, tmp_path):
+    """"Stopped." on its own is the silent failure this archive keeps hitting.
+
+    The chain's own finish handler dropped outcome.error, so a job halted by
+    the circuit breaker reported only that it had halted.
+    """
+    from types import SimpleNamespace
+
+    from tilearc.errors import TilearcError
+
+    tab = _chain_ready(qapp, context, tmp_path)
+    outcome = SimpleNamespace(
+        stopped_early=True,
+        error=TilearcError("25 tile positions in a row were absent from all "
+                           "67 versions. Open this: https://cdn.test/1/2/3.jpg"),
+        coordinates_done=0,
+        result=SimpleNamespace(fetched=0, missing=219, failed=0),
+        manifest={"bytesSavedBySharing": 0},
+        root=tmp_path,
+    )
+    tab._on_chain_finished(outcome)
+
+    log = tab.log.toPlainText()
+    assert "absent from all 67 versions" in log, log
+    assert "https://cdn.test/1/2/3.jpg" in log, "the URL to check must survive"
