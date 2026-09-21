@@ -103,6 +103,25 @@ CREATE TABLE IF NOT EXISTS tiles (
 CREATE INDEX IF NOT EXISTS tiles_by_content
     ON tiles (park, mode, z, x, y, sha256);
 
+-- Where a version had no tile. A park's map grows and shrinks between
+-- versions, so this is ordinary rather than exceptional -- the 2017 map simply
+-- does not reach as far as the 2026 one.
+--
+-- Recorded because otherwise a resumed chain has no way to tell "never asked"
+-- from "asked, and there is nothing there", and would re-request every absence
+-- on every run. It is also the answer to a question the tiles table cannot
+-- reach: when did this corner of the park first appear?
+CREATE TABLE IF NOT EXISTS absent (
+    park    TEXT    NOT NULL,
+    version TEXT    NOT NULL,
+    mode    TEXT    NOT NULL,
+    z       INTEGER NOT NULL,
+    x       INTEGER NOT NULL,
+    y       INTEGER NOT NULL,
+    seen_at TEXT    NOT NULL,
+    PRIMARY KEY (park, version, mode, z, x, y)
+) WITHOUT ROWID;
+
 -- Which versions of a park have been archived, and how completely.
 CREATE TABLE IF NOT EXISTS versions (
     park        TEXT NOT NULL,
@@ -205,6 +224,39 @@ class Catalogue:
             "SELECT 1 FROM tiles WHERE park=? AND version=? AND mode=? AND z=? AND x=? AND y=?",
             (park, version, mode, z, x, y),
         ).fetchone() is not None
+
+    def record_absent(self, park: str, version: str, mode: str, z: int, x: int, y: int) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO absent "
+            "(park, version, mode, z, x, y, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (park, version, mode, z, x, y, utcnow()),
+        )
+
+    def is_absent(self, park: str, version: str, mode: str, z: int, x: int, y: int) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM absent "
+            "WHERE park=? AND version=? AND mode=? AND z=? AND x=? AND y=?",
+            (park, version, mode, z, x, y),
+        ).fetchone() is not None
+
+    def settled(self, park: str, version: str, mode: str, z: int, x: int, y: int) -> bool:
+        """True when this version of this tile needs no further asking.
+
+        Either we hold it or we have been told there is nothing there. The
+        distinction matters to a reader; to a resume they are the same.
+        """
+        return self.has(park, version, mode, z, x, y) or self.is_absent(
+            park, version, mode, z, x, y
+        )
+
+    def first_seen(self, park: str, mode: str, z: int, x: int, y: int) -> str | None:
+        """The earliest archived version holding this tile, by archive order."""
+        row = self.db.execute(
+            "SELECT version FROM tiles WHERE park=? AND mode=? AND z=? AND x=? AND y=? "
+            "ORDER BY fetched_at LIMIT 1",
+            (park, mode, z, x, y),
+        ).fetchone()
+        return row["version"] if row else None
 
     def resolve(
         self, park: str, version: str, z: int, x: int, y: int, mode: str = ""

@@ -28,11 +28,36 @@ from PySide6.QtWidgets import (
 )
 
 from tilearc.library import CATALOGUE_NAME, Catalogue, human_saving
+from tilearc.versiondate import version_date, version_sort_key
 
 from .formatting import human_bytes
 from .pickers import choose_directory, dropped_directory
 
-COLUMNS = ("Park", "Version", "Tiles", "Stored here", "Reused", "On disk", "Done")
+COLUMNS = (
+    "Park", "Version", "Date", "Tiles", "Stored here", "Reused", "On disk", "Done",
+)
+#: Right-aligned, because they are quantities and reading them off a column
+#: means lining up the digits.
+_NUMERIC = (3, 4, 5, 6)
+_DONE_COLUMN = 7
+
+
+class _Cell(QTableWidgetItem):
+    """A cell that sorts by what it means, not by how it reads.
+
+    As text, "1,000" sorts before "999", "2 GB" before "900 MB", and a version
+    date nowhere useful at all. Every cell therefore carries a sort key
+    alongside its label; within a column the keys are all the same shape.
+    """
+
+    def __init__(self, text: str, key=None) -> None:
+        super().__init__(text)
+        self.key = text if key is None else key
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, _Cell):
+            return self.key < other.key
+        return super().__lt__(other)
 
 
 class LibraryTab(QWidget):
@@ -170,8 +195,8 @@ class LibraryTab(QWidget):
         catalogue = Catalogue(self.root)
         try:
             stats = catalogue.stats()
-            done = {
-                (row["park"], row["version"]): row["complete"]
+            recorded = {
+                (row["park"], row["version"]): row
                 for row in catalogue.versions()
             }
         finally:
@@ -181,26 +206,55 @@ class LibraryTab(QWidget):
             self.summary.setText("<b>The library is empty.</b>")
             return
 
+        # Off while filling, or every insertion re-sorts the rows underneath
+        # the loop and the cells land in the wrong ones.
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(stats))
         for index, row in enumerate(stats):
             reused = row["tiles"] - row["stored"]
-            finished = done.get((row["park"], row["version"]), 0)
+            version_row = recorded.get((row["park"], row["version"]))
+            finished = version_row["complete"] if version_row else 0
+            # The label is what the viewer called this map when it was
+            # archived, and the only place its date is written down.
+            label = version_row["label"] if version_row else None
+            date = version_date(row["version"], label)
+
             cells = (
-                row["park"],
-                row["version"],
-                f"{row['tiles']:,}",
-                f"{row['stored']:,}",
-                f"{reused:,}",
-                human_bytes(row["stored_bytes"] or 0),
-                "yes" if finished else "unfinished",
+                _Cell(row["park"]),
+                _Cell(row["version"]),
+                _Cell(date or "—", version_sort_key(row["version"], label)),
+                _Cell(f"{row['tiles']:,}", row["tiles"]),
+                _Cell(f"{row['stored']:,}", row["stored"]),
+                _Cell(f"{reused:,}", reused),
+                _Cell(human_bytes(row["stored_bytes"] or 0), row["stored_bytes"] or 0),
+                _Cell("yes" if finished else "unfinished", bool(finished)),
             )
-            for column, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                if column >= 2 and column <= 5:
+            if date:
+                cells[2].setToolTip(
+                    f"{label}  ·  version {row['version']}" if label
+                    else f"version {row['version']}"
+                )
+            else:
+                # Saying which label was read matters more here than anywhere:
+                # it is the difference between "nobody knows" and "the parser
+                # missed one".
+                cells[2].setToolTip(
+                    f"Nothing in {label!r} says when this map is from."
+                    if label else
+                    f"Version {row['version']} was archived without a label, "
+                    f"so nothing records when its map is from."
+                )
+            for column, item in enumerate(cells):
+                if column in _NUMERIC:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if column == 6 and not finished:
+                if column == _DONE_COLUMN and not finished:
                     item.setForeground(QColor("#b36b00"))
                 self.table.setItem(index, column, item)
+
+        self.table.setSortingEnabled(True)
+        # Oldest first: an archive of ninety maps is a chronology, and the
+        # codes are not one.
+        self.table.sortItems(2, Qt.AscendingOrder)
 
         totals = human_saving(stats)
         saved = (
