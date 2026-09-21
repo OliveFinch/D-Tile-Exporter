@@ -314,6 +314,20 @@ The two things to weigh:
   what makes a resume skip them instead of asking again every run — and what
   lets you ask later when a given tile first appeared.
 
+**If it stops early saying positions are absent.** A chain refuses to grind
+through 31 million requests when nothing at all is coming back, so it stops
+once 25 tile positions in a row turn out to be absent from every version with
+nothing yet downloaded. It names a URL when it does — open that in a browser.
+If it loads, the tiles are there and the fault is in the app; if it 404s, those
+coordinates are genuinely not on the server and the zoom range or the coverage
+file is what to look at.
+
+Positions the library already holds never count towards that: starting a chain
+over a folder that already has some versions archived means those are skipped
+rather than fetched, so nothing downloads while the older versions legitimately
+report nothing — which is not the same as a job asking for coordinates that do
+not exist.
+
 Resume is coordinate by coordinate. The state database holds one row per tile
 position rather than one per position per version, which is the difference
 between 575,490 rows and 53,520,570; within a position it is the catalogue that

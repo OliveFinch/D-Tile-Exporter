@@ -335,3 +335,145 @@ def test_a_chain_of_any_length_archives_every_version_it_names(tmp_path, version
         catalogue.close()
     assert archived == set(versions)
     assert outcome.complete
+
+
+# ---------------------------------------------------------------------------
+# when nothing comes back at all
+# ---------------------------------------------------------------------------
+
+
+def _many_versions(count=20, side=8):
+    """A park of `side` x `side` positions over `count` versions.
+
+    Big enough to exercise the run-of-absent-positions threshold, which a
+    four-tile world never reaches.
+    """
+    park = _park()
+    bounds = TileBounds(0, side - 1, 0, side - 1)
+    versions = [str(n) for n in range(1, count + 1)]
+    coordinates = JobPlan(
+        park=park, version=VersionEntry(code=versions[-1]),
+        zooms=[ZoomPlan(11, bounds)], modes=[],
+    )
+    return ChainPlan(
+        park=park,
+        versions=[VersionEntry(code=v, label=f"v{v}") for v in versions],
+        coordinates=coordinates,
+    )
+
+
+def _empty_handler(served=None, present=()):
+    """A CDN where only `present` coordinates exist, in every version."""
+    def handle(request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.strip("/").split("/")
+        code, z, x, y = parts[0], int(parts[1]), int(parts[2]), int(parts[3].split(".")[0])
+        if served is not None:
+            served.append((code, z, x, y))
+        if (z, x, y) in present:
+            return httpx.Response(200, content=b"here-" + code.encode())
+        return httpx.Response(404)
+
+    return handle
+
+
+def test_a_few_dead_coordinates_do_not_kill_the_job(tmp_path):
+    """The bug that stopped a 31-million-request DLR chain after 438 tiles.
+
+    The inherited check aborts after 200 "missing" responses with nothing
+    downloaded. A chain asks each position of every version, so with 67
+    versions that is three bad positions — nowhere near enough to condemn a
+    month-long job, and it stopped one dead.
+    """
+    plan = _many_versions(20)
+    served = []
+    # Three of the four positions are empty everywhere; one is fine.
+    outcome = _run(
+        tmp_path, plan=plan,
+        handler=_empty_handler(served, present={(11, 0, 3)}),
+    )
+
+    assert outcome.complete, "a live position exists; the job must reach it"
+    assert outcome.result.fetched == 20, "all 20 versions of the live position"
+    # >= because a long run of absences after a success triggers one re-probe
+    # to check the server is not simply refusing us.
+    assert len(served) >= plan.total_requests, "and it asked for everything"
+
+
+def test_a_wholly_empty_job_still_stops_early(tmp_path):
+    """The safety net has to survive the fix, or 31 million requests follow."""
+    plan = _many_versions(20)
+    served = []
+    outcome = _run(tmp_path, plan=plan, handler=_empty_handler(served))
+
+    assert outcome.stopped_early
+    assert not outcome.complete
+    assert outcome.result.fetched == 0
+    assert len(served) < plan.total_requests, "it must not ask for everything"
+
+
+def test_stopping_early_says_why_and_names_a_url(tmp_path):
+    """"Stopped." with no reason is the failure this archive keeps hitting."""
+    plan = _many_versions(20)
+    outcome = _run(tmp_path, plan=plan, handler=_empty_handler())
+
+    assert outcome.error is not None
+    message = str(outcome.error)
+    assert "absent from all 20 versions" in message
+    assert "nothing has downloaded" in message
+    # The ten-second check that settles it, rather than more reasoning.
+    assert "https://cdn.test/" in message
+    assert ".jpg" in message
+
+
+def test_the_absent_run_resets_when_something_downloads(tmp_path):
+    """Positions absent in a row is the signal; scattered ones are not."""
+    plan = _many_versions(20)
+    # Alternating live and dead positions: never 25 dead in a row.
+    outcome = _run(
+        tmp_path, plan=plan,
+        handler=_empty_handler(present={(11, x, y) for x in range(8) for y in (0, 4)}),
+    )
+    assert outcome.complete
+    assert outcome.result.fetched == 8 * 2 * 20
+
+
+def test_a_library_that_already_holds_some_versions_does_not_look_empty(tmp_path):
+    """The DLR run that stopped after 438 tiles with 0 downloaded.
+
+    Three versions were already archived. For each position the chain skipped
+    those (already held, so no *fetch* is recorded) and asked the older ones,
+    which legitimately 404 because the older maps are smaller. Nothing
+    downloaded, hundreds missing — indistinguishable, to a check counting
+    responses, from a job asking for coordinates that do not exist.
+
+    It is entirely distinguishable: the archive already holds the position.
+    """
+    plan = _many_versions(20)
+    newest = [v.code for v in plan.versions[-3:]]
+
+    # Pre-archive the three newest versions, as a per-version download would.
+    writer = ChainWriter(tmp_path, plan)
+    writer.open()
+    for z, x, y, mode in plan.iter_coordinates():
+        for code in newest:
+            writer.write(code, z, x, y, mode, b"held-" + code.encode())
+    writer.finalize({"tool": "test"}, complete=True)
+    writer.close()
+
+    # Only the three newest ever had these tiles; the older ones 404.
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    served = []
+
+    def counting(request):
+        served.append(request)
+        return handle(request)
+
+    outcome = _run(tmp_path, plan=plan, handler=counting)
+
+    assert not outcome.stopped_early, f"stopped: {outcome.error}"
+    assert outcome.complete
+    # Every older version of every position was asked, and none aborted it.
+    assert len(served) == plan.tiles_per_version * (len(plan.versions) - 3)
+    assert outcome.result.skipped == plan.tiles_per_version * 3
